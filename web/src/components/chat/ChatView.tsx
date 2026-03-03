@@ -729,7 +729,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </div>
 
           {/* Tab content */}
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 overflow-hidden min-h-0">
             {sidebarTab === 'files' ? (
               <FilePanel groupJid={groupJid} />
             ) : sidebarTab === 'env' ? (
