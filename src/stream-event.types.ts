@@ -15,6 +15,7 @@ export type StreamEventType =
   | 'hook_started' | 'hook_progress' | 'hook_response'
   | 'task_start' | 'task_notification'
   | 'todo_update'
+  | 'usage'
   | 'status' | 'init';
 
 export interface StreamEvent {
@@ -39,4 +40,15 @@ export interface StreamEvent {
   isTeammate?: boolean;
   toolInput?: Record<string, unknown>;
   todos?: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+  /** Token usage data emitted at query completion */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+    costUSD: number;
+    durationMs: number;
+    numTurns: number;
+    modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+  };
 }

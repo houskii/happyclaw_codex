@@ -55,6 +55,7 @@ import {
   setSession,
   deleteSession,
   storeMessageDirect,
+  updateLatestMessageTokenUsage,
   updateChatName,
   updateTask,
   createAgent,
@@ -753,6 +754,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               }
             } catch (err) {
               logger.warn({ err, taskId: se.taskId }, 'Failed to persist task_notification to DB');
+            }
+          }
+
+          // Persist token usage to the latest agent message
+          if (se.eventType === 'usage' && se.usage) {
+            try {
+              updateLatestMessageTokenUsage(chatJid, JSON.stringify(se.usage));
+              logger.debug(
+                { chatJid, costUSD: se.usage.costUSD, inputTokens: se.usage.inputTokens },
+                'Token usage persisted',
+              );
+            } catch (err) {
+              logger.warn({ err, chatJid }, 'Failed to persist token usage');
             }
           }
 
@@ -1845,6 +1859,15 @@ async function processAgentConversation(chatJid: string, agentId: string): Promi
     // Stream events
     if (output.status === 'stream' && output.streamEvent) {
       broadcastStreamEvent(chatJid, output.streamEvent, agentId);
+
+      // Persist token usage for agent conversations
+      if (output.streamEvent.eventType === 'usage' && output.streamEvent.usage) {
+        try {
+          updateLatestMessageTokenUsage(virtualChatJid, JSON.stringify(output.streamEvent.usage));
+        } catch (err) {
+          logger.warn({ err, chatJid, agentId }, 'Failed to persist agent conversation token usage');
+        }
+      }
       return;
     }
 

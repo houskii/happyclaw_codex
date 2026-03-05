@@ -106,6 +106,7 @@ export function initDatabase(): void {
       timestamp TEXT,
       is_from_me INTEGER,
       attachments TEXT,
+      token_usage TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -344,7 +345,10 @@ export function initDatabase(): void {
     'timestamp',
     'is_from_me',
     'attachments',
+    'token_usage',
   ]);
+  // v19→v20 migration: add token_usage column to messages
+  ensureColumn('messages', 'token_usage', 'TEXT');
   assertSchema('scheduled_tasks', [
     'id',
     'group_folder',
@@ -521,7 +525,7 @@ export function initDatabase(): void {
     })();
   }
 
-  const SCHEMA_VERSION = '19';
+  const SCHEMA_VERSION = '20';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -636,9 +640,10 @@ export function storeMessageDirect(
   timestamp: string,
   isFromMe: boolean,
   attachments?: string,
+  tokenUsage?: string,
 ): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msgId,
     chatJid,
@@ -648,7 +653,212 @@ export function storeMessageDirect(
     timestamp,
     isFromMe ? 1 : 0,
     attachments ?? null,
+    tokenUsage ?? null,
   );
+}
+
+/**
+ * Update the token_usage field on the most recent agent message for a chat.
+ * Called when usage stream event arrives (after the result message is stored).
+ */
+export function updateLatestMessageTokenUsage(
+  chatJid: string,
+  tokenUsage: string,
+): void {
+  db.prepare(
+    `UPDATE messages SET token_usage = ?
+     WHERE rowid = (
+       SELECT rowid FROM messages
+       WHERE chat_jid = ? AND is_from_me = 1 AND token_usage IS NULL
+       ORDER BY timestamp DESC LIMIT 1
+     )`,
+  ).run(tokenUsage, chatJid);
+}
+
+/**
+ * Get token usage statistics aggregated by date.
+ */
+export function getTokenUsageStats(
+  days: number,
+  groupFolder?: string,
+): Array<{
+  date: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd: number;
+  message_count: number;
+}> {
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const sinceStr = since.toISOString();
+
+  // If groupFolder is specified, join with chats to find all JIDs for that folder
+  // For now, aggregate across all chats (admin view)
+  const baseQuery = `
+    SELECT
+      date(m.timestamp) as date,
+      json_extract(m.token_usage, '$.modelUsage') as model_usage_json,
+      json_extract(m.token_usage, '$.inputTokens') as input_tokens,
+      json_extract(m.token_usage, '$.outputTokens') as output_tokens,
+      json_extract(m.token_usage, '$.cacheReadInputTokens') as cache_read_tokens,
+      json_extract(m.token_usage, '$.cacheCreationInputTokens') as cache_creation_tokens,
+      json_extract(m.token_usage, '$.costUSD') as cost_usd
+    FROM messages m
+    WHERE m.token_usage IS NOT NULL
+      AND m.timestamp >= ?
+    ORDER BY m.timestamp ASC
+  `;
+
+  const rows = db.prepare(baseQuery).all(sinceStr) as Array<{
+    date: string;
+    model_usage_json: string | null;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+    cost_usd: number;
+  }>;
+
+  // Aggregate by date + model
+  const aggregated = new Map<string, {
+    date: string;
+    model: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+    cost_usd: number;
+    message_count: number;
+  }>();
+
+  for (const row of rows) {
+    if (row.model_usage_json) {
+      try {
+        const modelUsage = JSON.parse(row.model_usage_json) as Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+        for (const [model, usage] of Object.entries(modelUsage)) {
+          const key = `${row.date}|${model}`;
+          const existing = aggregated.get(key);
+          if (existing) {
+            existing.input_tokens += usage.inputTokens || 0;
+            existing.output_tokens += usage.outputTokens || 0;
+            existing.cost_usd += usage.costUSD || 0;
+            existing.message_count += 1;
+          } else {
+            aggregated.set(key, {
+              date: row.date,
+              model,
+              input_tokens: usage.inputTokens || 0,
+              output_tokens: usage.outputTokens || 0,
+              cache_read_tokens: 0,
+              cache_creation_tokens: 0,
+              cost_usd: usage.costUSD || 0,
+              message_count: 1,
+            });
+          }
+        }
+      } catch {
+        // fallback: use aggregate fields
+        const key = `${row.date}|unknown`;
+        const existing = aggregated.get(key);
+        if (existing) {
+          existing.input_tokens += row.input_tokens || 0;
+          existing.output_tokens += row.output_tokens || 0;
+          existing.cache_read_tokens += row.cache_read_tokens || 0;
+          existing.cache_creation_tokens += row.cache_creation_tokens || 0;
+          existing.cost_usd += row.cost_usd || 0;
+          existing.message_count += 1;
+        } else {
+          aggregated.set(key, {
+            date: row.date,
+            model: 'unknown',
+            input_tokens: row.input_tokens || 0,
+            output_tokens: row.output_tokens || 0,
+            cache_read_tokens: row.cache_read_tokens || 0,
+            cache_creation_tokens: row.cache_creation_tokens || 0,
+            cost_usd: row.cost_usd || 0,
+            message_count: 1,
+          });
+        }
+      }
+    } else {
+      const key = `${row.date}|unknown`;
+      const existing = aggregated.get(key);
+      if (existing) {
+        existing.input_tokens += row.input_tokens || 0;
+        existing.output_tokens += row.output_tokens || 0;
+        existing.cache_read_tokens += row.cache_read_tokens || 0;
+        existing.cache_creation_tokens += row.cache_creation_tokens || 0;
+        existing.cost_usd += row.cost_usd || 0;
+        existing.message_count += 1;
+      } else {
+        aggregated.set(key, {
+          date: row.date,
+          model: 'unknown',
+          input_tokens: row.input_tokens || 0,
+          output_tokens: row.output_tokens || 0,
+          cache_read_tokens: row.cache_read_tokens || 0,
+          cache_creation_tokens: row.cache_creation_tokens || 0,
+          cost_usd: row.cost_usd || 0,
+          message_count: 1,
+        });
+      }
+    }
+  }
+
+  return Array.from(aggregated.values());
+}
+
+/**
+ * Get token usage summary totals.
+ */
+export function getTokenUsageSummary(
+  days: number,
+): {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  totalCostUSD: number;
+  totalMessages: number;
+  totalSessions: number;
+} {
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const sinceStr = since.toISOString();
+
+  const row = db.prepare(`
+    SELECT
+      COALESCE(SUM(json_extract(token_usage, '$.inputTokens')), 0) as total_input,
+      COALESCE(SUM(json_extract(token_usage, '$.outputTokens')), 0) as total_output,
+      COALESCE(SUM(json_extract(token_usage, '$.cacheReadInputTokens')), 0) as total_cache_read,
+      COALESCE(SUM(json_extract(token_usage, '$.cacheCreationInputTokens')), 0) as total_cache_creation,
+      COALESCE(SUM(json_extract(token_usage, '$.costUSD')), 0) as total_cost,
+      COUNT(*) as total_messages,
+      COUNT(DISTINCT date(timestamp)) as total_sessions
+    FROM messages
+    WHERE token_usage IS NOT NULL AND timestamp >= ?
+  `).get(sinceStr) as {
+    total_input: number;
+    total_output: number;
+    total_cache_read: number;
+    total_cache_creation: number;
+    total_cost: number;
+    total_messages: number;
+    total_sessions: number;
+  };
+
+  return {
+    totalInputTokens: row.total_input,
+    totalOutputTokens: row.total_output,
+    totalCacheReadTokens: row.total_cache_read,
+    totalCacheCreationTokens: row.total_cache_creation,
+    totalCostUSD: row.total_cost,
+    totalMessages: row.total_messages,
+    totalSessions: row.total_sessions,
+  };
 }
 
 export function getNewMessages(

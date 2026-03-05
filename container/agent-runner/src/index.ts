@@ -877,6 +877,41 @@ async function runQuery(
         result: effectiveResult,
         newSessionId
       });
+
+      // Emit usage stream event with token counts and cost
+      const resultMsg = message as Record<string, unknown>;
+      const sdkUsage = resultMsg.usage as Record<string, number> | undefined;
+      const sdkModelUsage = resultMsg.modelUsage as Record<string, Record<string, number>> | undefined;
+      if (sdkUsage) {
+        const modelUsageSummary: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }> = {};
+        if (sdkModelUsage) {
+          for (const [model, mu] of Object.entries(sdkModelUsage)) {
+            modelUsageSummary[model] = {
+              inputTokens: mu.inputTokens || 0,
+              outputTokens: mu.outputTokens || 0,
+              costUSD: mu.costUSD || 0,
+            };
+          }
+        }
+        emit({
+          status: 'stream',
+          result: null,
+          streamEvent: {
+            eventType: 'usage',
+            usage: {
+              inputTokens: sdkUsage.input_tokens || 0,
+              outputTokens: sdkUsage.output_tokens || 0,
+              cacheReadInputTokens: sdkUsage.cache_read_input_tokens || 0,
+              cacheCreationInputTokens: sdkUsage.cache_creation_input_tokens || 0,
+              costUSD: (resultMsg.total_cost_usd as number) || 0,
+              durationMs: (resultMsg.duration_ms as number) || 0,
+              numTurns: (resultMsg.num_turns as number) || 0,
+              modelUsage: Object.keys(modelUsageSummary).length > 0 ? modelUsageSummary : undefined,
+            },
+          },
+        });
+        log(`Usage: input=${sdkUsage.input_tokens} output=${sdkUsage.output_tokens} cost=$${resultMsg.total_cost_usd} turns=${resultMsg.num_turns}`);
+      }
     }
   }
 
