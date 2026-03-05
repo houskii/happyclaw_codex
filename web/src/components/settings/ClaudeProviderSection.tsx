@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ExternalLink, Loader2, Plus, RefreshCw, Rocket, X } from 'lucide-react';
+import { ExternalLink, HardDrive, Loader2, Plus, RefreshCw, Rocket, X } from 'lucide-react';
 
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -34,6 +34,15 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
   const [authToken, setAuthToken] = useState('');
   const [authTokenDirty, setAuthTokenDirty] = useState(false);
   const [customEnvRows, setCustomEnvRows] = useState<EnvRow[]>([]);
+
+  // Local Claude Code detection
+  const [localCC, setLocalCC] = useState<{
+    detected: boolean;
+    hasCredentials: boolean;
+    expiresAt: number | null;
+    accessTokenMasked: string | null;
+  } | null>(null);
+  const [localCCImporting, setLocalCCImporting] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -77,6 +86,16 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
   }, [setError]);
 
   useEffect(() => { loadConfig(); }, [loadConfig]);
+
+  // Detect local Claude Code credentials
+  useEffect(() => {
+    api.get<{
+      detected: boolean;
+      hasCredentials: boolean;
+      expiresAt: number | null;
+      accessTokenMasked: string | null;
+    }>('/api/config/claude/detect-local').then(setLocalCC).catch(() => {});
+  }, []);
 
   // Fetch Claude service status
   useEffect(() => {
@@ -174,6 +193,21 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
       setError(getErrorMessage(err, '保存官方提供商配置失败'));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleImportLocalCC = async () => {
+    setLocalCCImporting(true);
+    setNotice(null);
+    setError(null);
+    try {
+      await api.post('/api/config/claude/import-local');
+      setNotice('已导入本机 Claude Code 登录凭据。');
+      await loadConfig();
+    } catch (err) {
+      setError(getErrorMessage(err, '导入本机凭据失败'));
+    } finally {
+      setLocalCCImporting(false);
     }
   };
 
@@ -406,6 +440,25 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Local Claude Code detection */}
+          {localCC?.hasCredentials && !config?.hasClaudeOAuthCredentials && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <HardDrive className="w-4 h-4 text-blue-600" />
+                <div className="text-sm font-medium text-slate-800">
+                  检测到本机已登录 Claude Code
+                </div>
+              </div>
+              <div className="text-xs text-slate-600">
+                本机 <code className="bg-white/60 px-1 rounded">~/.claude/.credentials.json</code> 中存在有效凭据（{localCC.accessTokenMasked}），可一键导入。
+              </div>
+              <Button onClick={handleImportLocalCC} disabled={loading || localCCImporting}>
+                {localCCImporting ? <Loader2 className="size-4 animate-spin" /> : <HardDrive className="size-4" />}
+                导入本机凭据
+              </Button>
             </div>
           )}
 

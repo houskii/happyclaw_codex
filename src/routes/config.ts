@@ -44,6 +44,8 @@ import {
   saveUserTelegramConfig,
   updateAllSessionCredentials,
   refreshOAuthCredentials,
+  detectLocalClaudeCode,
+  importLocalClaudeCredentials,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials } from '../runtime-config.js';
 import type { AuthUser } from '../types.js';
@@ -1086,5 +1088,46 @@ configRoutes.delete('/user-im/telegram/paired-chats/:jid', authMiddleware, (c) =
   logger.info({ jid, userId: user.id }, 'Telegram chat unpaired');
   return c.json({ success: true });
 });
+
+// ─── Local Claude Code detection ──────────────────────────────────
+
+configRoutes.get('/claude/detect-local', authMiddleware, (c) => {
+  return c.json(detectLocalClaudeCode());
+});
+
+configRoutes.post(
+  '/claude/import-local',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    const creds = importLocalClaudeCredentials();
+    if (!creds) {
+      return c.json({ error: '未检测到本机 Claude Code 登录凭据' }, 404);
+    }
+
+    const actor = (c.get('user') as AuthUser).username;
+    const current = getClaudeProviderConfig();
+
+    try {
+      const saved = saveClaudeProviderConfig({
+        anthropicBaseUrl: current.anthropicBaseUrl,
+        anthropicAuthToken: current.anthropicAuthToken,
+        anthropicApiKey: current.anthropicApiKey,
+        claudeCodeOauthToken: '',
+        claudeOAuthCredentials: creds,
+      });
+
+      updateAllSessionCredentials(saved);
+      deps?.queue?.closeAllActiveForCredentialRefresh();
+      appendClaudeConfigAudit(actor, 'import_local_cc', ['claudeOAuthCredentials:import_local']);
+
+      return c.json(toPublicClaudeProviderConfig(saved));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to import local credentials';
+      logger.warn({ err }, 'Failed to import local Claude Code credentials');
+      return c.json({ error: message }, 500);
+    }
+  },
+);
 
 export default configRoutes;

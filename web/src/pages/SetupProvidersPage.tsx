@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, ExternalLink, KeyRound, Loader2, Link2, Plus, Server, ShieldCheck, X } from 'lucide-react';
+import { ArrowRight, Check, ExternalLink, HardDrive, KeyRound, Loader2, Link2, Plus, Server, ShieldCheck, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 import { Input } from '@/components/ui/input';
@@ -68,6 +68,16 @@ export function SetupProvidersPage() {
   // Official mode
   const [officialToken, setOfficialToken] = useState('');
 
+  // Local Claude Code detection
+  const [localCC, setLocalCC] = useState<{
+    detected: boolean;
+    hasCredentials: boolean;
+    expiresAt: number | null;
+    accessTokenMasked: string | null;
+  } | null>(null);
+  const [localCCImporting, setLocalCCImporting] = useState(false);
+  const [localCCImported, setLocalCCImported] = useState(false);
+
   // OAuth flow state
   const [oauthLoading, setOauthLoading] = useState(false);
   const [oauthState, setOauthState] = useState<string | null>(null);
@@ -94,6 +104,16 @@ export function SetupProvidersPage() {
     }
   }, [setupStatus, navigate]);
 
+  // Detect local Claude Code credentials on mount
+  useEffect(() => {
+    api.get<{
+      detected: boolean;
+      hasCredentials: boolean;
+      expiresAt: number | null;
+      accessTokenMasked: string | null;
+    }>('/api/config/claude/detect-local').then(setLocalCC).catch(() => {});
+  }, []);
+
   const addCustomEnvRow = () => setCustomEnvRows((rows) => [...rows, { key: '', value: '' }]);
   const removeCustomEnvRow = (idx: number) =>
     setCustomEnvRows((rows) => rows.filter((_, i) => i !== idx));
@@ -101,6 +121,20 @@ export function SetupProvidersPage() {
     setCustomEnvRows((rows) =>
       rows.map((row, i) => (i === idx ? { ...row, [field]: value } : row)),
     );
+
+  const handleImportLocalCC = async () => {
+    setLocalCCImporting(true);
+    setError(null);
+    try {
+      await api.post('/api/config/claude/import-local');
+      setLocalCCImported(true);
+      setNotice('已导入本机 Claude Code 登录凭据。');
+    } catch (err) {
+      setError(getErrorMessage(err, '导入本机凭据失败'));
+    } finally {
+      setLocalCCImporting(false);
+    }
+  };
 
   const handleOAuthStart = async () => {
     setOauthLoading(true);
@@ -165,8 +199,8 @@ export function SetupProvidersPage() {
         return;
       }
       customEnv = envResult.customEnv;
-    } else if (!officialToken.trim() && !oauthDone) {
-      setError('官方渠道请通过一键登录或手动填写 setup-token / .credentials.json');
+    } else if (!officialToken.trim() && !oauthDone && !localCCImported) {
+      setError('官方渠道请通过一键登录、导入本机凭据或手动填写 setup-token / .credentials.json');
       return;
     }
 
@@ -180,8 +214,8 @@ export function SetupProvidersPage() {
       }
 
       if (providerMode === 'official') {
-        if (oauthDone) {
-          // OAuth already saved the token via /oauth/callback — just clear base URL and custom env
+        if (oauthDone || localCCImported) {
+          // OAuth or local import already saved the credentials — just clear base URL and custom env
           await api.put('/api/config/claude', { anthropicBaseUrl: '' });
           await api.put('/api/config/claude/custom-env', { customEnv: {} });
         } else {
@@ -322,6 +356,36 @@ export function SetupProvidersPage() {
 
           {providerMode === 'official' ? (
             <div className="space-y-4">
+              {/* Local Claude Code detection */}
+              {localCC?.hasCredentials && (
+                <div className={`rounded-lg border p-4 space-y-3 ${
+                  localCCImported
+                    ? 'border-emerald-200 bg-emerald-50/50'
+                    : 'border-blue-200 bg-blue-50/50'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    <HardDrive className="w-4 h-4 text-blue-600" />
+                    <div className="text-sm font-medium text-slate-800">
+                      检测到本机已登录 Claude Code
+                    </div>
+                  </div>
+                  <div className="text-xs text-slate-600">
+                    本机 <code className="bg-white/60 px-1 rounded">~/.claude/.credentials.json</code> 中存在有效凭据（{localCC.accessTokenMasked}），可一键导入。
+                  </div>
+                  {localCCImported ? (
+                    <div className="flex items-center gap-1.5 text-sm text-emerald-700">
+                      <Check className="w-4 h-4" />
+                      已导入，点击下方按钮完成配置。
+                    </div>
+                  ) : (
+                    <Button onClick={handleImportLocalCC} disabled={localCCImporting || saving}>
+                      {localCCImporting ? <Loader2 className="size-4 animate-spin" /> : <HardDrive className="size-4" />}
+                      导入本机凭据
+                    </Button>
+                  )}
+                </div>
+              )}
+
               {/* OAuth one-click login */}
               <div className="rounded-lg border border-teal-200 bg-teal-50/50 p-4 space-y-3">
                 <div className="text-sm font-medium text-slate-800">一键登录 Claude（推荐）</div>

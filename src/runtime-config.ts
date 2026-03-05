@@ -1294,6 +1294,72 @@ export async function refreshOAuthCredentials(
   }
 }
 
+// ─── Local Claude Code detection ──────────────────────────────────
+
+export interface LocalClaudeCodeStatus {
+  detected: boolean;
+  hasCredentials: boolean;
+  expiresAt: number | null;
+  accessTokenMasked: string | null;
+}
+
+/**
+ * Detect if the host machine has a valid ~/.claude/.credentials.json
+ * (i.e. user has logged into Claude Code locally).
+ */
+export function detectLocalClaudeCode(): LocalClaudeCodeStatus {
+  const homeDir = process.env.HOME || '/root';
+  const credFile = path.join(homeDir, '.claude', '.credentials.json');
+
+  try {
+    if (!fs.existsSync(credFile)) {
+      return { detected: false, hasCredentials: false, expiresAt: null, accessTokenMasked: null };
+    }
+
+    const content = JSON.parse(fs.readFileSync(credFile, 'utf-8'));
+    const oauth = content?.claudeAiOauth;
+
+    if (oauth?.accessToken && oauth?.refreshToken) {
+      return {
+        detected: true,
+        hasCredentials: true,
+        expiresAt: typeof oauth.expiresAt === 'number' ? oauth.expiresAt : null,
+        accessTokenMasked: maskSecret(oauth.accessToken),
+      };
+    }
+
+    return { detected: true, hasCredentials: false, expiresAt: null, accessTokenMasked: null };
+  } catch {
+    return { detected: false, hasCredentials: false, expiresAt: null, accessTokenMasked: null };
+  }
+}
+
+/**
+ * Read local ~/.claude/.credentials.json and return parsed OAuth credentials.
+ * Returns null if not found or invalid.
+ */
+export function importLocalClaudeCredentials(): ClaudeOAuthCredentials | null {
+  const homeDir = process.env.HOME || '/root';
+  const credFile = path.join(homeDir, '.claude', '.credentials.json');
+
+  try {
+    const content = JSON.parse(fs.readFileSync(credFile, 'utf-8'));
+    const oauth = content?.claudeAiOauth;
+
+    if (oauth?.accessToken && oauth?.refreshToken) {
+      return {
+        accessToken: oauth.accessToken,
+        refreshToken: oauth.refreshToken,
+        expiresAt: typeof oauth.expiresAt === 'number' ? oauth.expiresAt : Date.now() + 8 * 3600_000,
+        scopes: Array.isArray(oauth.scopes) ? oauth.scopes : [],
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Appearance config (plain JSON, no encryption) ────────────────
 
 const APPEARANCE_CONFIG_FILE = path.join(
