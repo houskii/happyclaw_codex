@@ -41,7 +41,7 @@ export interface SchedulerDependencies {
     groupFolder: string,
     displayName?: string,
   ) => void;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string) => Promise<string | undefined | void>;
   assistantName: string;
   dailySummaryDeps?: DailySummaryDeps;
 }

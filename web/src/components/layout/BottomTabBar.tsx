@@ -1,11 +1,12 @@
 import { NavLink, useLocation } from 'react-router-dom';
-import { MessageSquare, Clock, Activity, Settings } from 'lucide-react';
+import { MessageSquare, Clock, Activity, Settings, BarChart3 } from 'lucide-react';
 import { useScrollDirection } from '../../hooks/useScrollDirection';
 import { lightTap } from '../../hooks/useHaptic';
 
 export const navItems = [
   { path: '/chat', icon: MessageSquare, label: '工作台' },
   { path: '/tasks', icon: Clock, label: '任务' },
+  { path: '/usage', icon: BarChart3, label: '用量' },
   { path: '/monitor', icon: Activity, label: '监控' },
   { path: '/settings', icon: Settings, label: '设置' },
 ];
