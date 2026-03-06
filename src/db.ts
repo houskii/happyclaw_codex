@@ -343,6 +343,8 @@ export function initDatabase(): void {
     })();
   }
 
+  // v19→v20 migration: add token_usage column to messages
+  ensureColumn('messages', 'token_usage', 'TEXT');
   assertSchema('messages', [
     'id',
     'chat_jid',
