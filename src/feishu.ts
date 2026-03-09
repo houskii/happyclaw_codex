@@ -717,15 +717,6 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       }
     }
 
-    if (source === 'ws') {
-      addReaction(messageId, 'OnIt')
-        .then((reactionId) => {
-          if (reactionId) {
-            ackReactionByChat.set(chatId, `${messageId}:${reactionId}`);
-          }
-        })
-        .catch(() => {});
-    }
     lastMessageIdByChat.set(chatId, messageId);
 
     const resolvedCreateTimeMs = createTimeMs > 0 ? createTimeMs : Date.now();
@@ -768,6 +759,17 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         logger.debug({ chatJid, messageId }, 'Dropped group message: mention required but bot not mentioned');
         return;
       }
+    }
+
+    // ── Ack Reaction：确认已收到消息（在 mention 过滤之后，避免对未处理的消息加表情） ──
+    if (source === 'ws') {
+      addReaction(messageId, 'OnIt')
+        .then((reactionId) => {
+          if (reactionId) {
+            ackReactionByChat.set(chatId, `${messageId}:${reactionId}`);
+          }
+        })
+        .catch(() => {});
     }
 
     // Store message and broadcast to WebSocket clients
