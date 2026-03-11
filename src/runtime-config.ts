@@ -2566,6 +2566,7 @@ export interface SystemSettings {
   billingMinStartBalanceUsd: number;
   billingCurrency: string;
   billingCurrencyRate: number;
+  memoryQueryTimeout: number;
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -2583,6 +2584,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   billingMinStartBalanceUsd: 0.01,
   billingCurrency: 'USD',
   billingCurrencyRate: 1,
+  memoryQueryTimeout: 60000,
 };
 
 function parseIntEnv(envVar: string | undefined, fallback: number): number {
@@ -2665,6 +2667,10 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.billingCurrencyRate === 'number' && raw.billingCurrencyRate > 0
         ? raw.billingCurrencyRate
         : DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
+    memoryQueryTimeout:
+      typeof raw.memoryQueryTimeout === 'number' && raw.memoryQueryTimeout > 0
+        ? raw.memoryQueryTimeout
+        : DEFAULT_SYSTEM_SETTINGS.memoryQueryTimeout,
   };
 }
 
@@ -2720,6 +2726,10 @@ function buildEnvFallbackSettings(): SystemSettings {
     billingCurrencyRate: parseFloatEnv(
       process.env.BILLING_CURRENCY_RATE,
       DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
+    ),
+    memoryQueryTimeout: parseIntEnv(
+      process.env.MEMORY_QUERY_TIMEOUT,
+      DEFAULT_SYSTEM_SETTINGS.memoryQueryTimeout,
     ),
   };
 }
@@ -2800,6 +2810,8 @@ export function saveSystemSettings(
       DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd;
   if (merged.billingMinStartBalanceUsd > 1000000)
     merged.billingMinStartBalanceUsd = 1000000;
+  if (merged.memoryQueryTimeout < 10000) merged.memoryQueryTimeout = 10000; // min 10s
+  if (merged.memoryQueryTimeout > 300000) merged.memoryQueryTimeout = 300000; // max 5 min
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
   const tmp = `${SYSTEM_SETTINGS_FILE}.tmp`;
