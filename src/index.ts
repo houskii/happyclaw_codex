@@ -5441,6 +5441,7 @@ async function processAgentConversation(
       agentId,
       agentName: agent.name,
       images: imagesForAgent,
+      userId: effectiveGroup.created_by,
     };
 
     // Write tasks/groups snapshots

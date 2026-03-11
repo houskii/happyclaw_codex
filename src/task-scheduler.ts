@@ -399,6 +399,7 @@ async function runTask(
         isAdminHome,
         isScheduledTask: true,
         taskRunId: options?.taskRunId,
+        userId: workspaceGroup.created_by,
       },
       (proc, identifier) =>
         deps.onProcess(

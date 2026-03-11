@@ -64,7 +64,7 @@ export class GroupQueue {
   private serializationKeyResolver: ((groupJid: string) => string) | null =
     null;
   private onMaxRetriesExceededFn: ((groupJid: string) => void) | null = null;
-  private onContainerExitFn: ((groupJid: string) => void) | null = null;
+  private onContainerExitListeners: Array<(groupJid: string) => void> = [];
   private onRunnerStateChangeFn:
     | ((chatJid: string, state: 'idle' | 'running') => void)
     | null = null;
@@ -118,8 +118,8 @@ export class GroupQueue {
     this.onMaxRetriesExceededFn = fn;
   }
 
-  setOnContainerExit(fn: (groupJid: string) => void): void {
-    this.onContainerExitFn = fn;
+  addOnContainerExitListener(fn: (groupJid: string) => void): void {
+    this.onContainerExitListeners.push(fn);
   }
 
   setOnRunnerStateChange(
@@ -980,10 +980,12 @@ export class GroupQueue {
       } catch (err) {
         logger.error({ groupJid, err }, 'onRunnerStateChange(idle) failed');
       }
-      try {
-        this.onContainerExitFn?.(groupJid);
-      } catch (err) {
-        logger.error({ groupJid, err }, 'onContainerExit callback failed');
+      for (const listener of this.onContainerExitListeners) {
+        try {
+          listener(groupJid);
+        } catch (err) {
+          logger.error({ groupJid, err }, 'onContainerExit listener failed');
+        }
       }
       try {
         this.drainGroup(groupJid);
@@ -1060,10 +1062,12 @@ export class GroupQueue {
       } catch (err) {
         logger.error({ groupJid, err }, 'onRunnerStateChange(idle) failed');
       }
-      try {
-        this.onContainerExitFn?.(groupJid);
-      } catch (err) {
-        logger.error({ groupJid, err }, 'onContainerExit callback failed');
+      for (const listener of this.onContainerExitListeners) {
+        try {
+          listener(groupJid);
+        } catch (err) {
+          logger.error({ groupJid, err }, 'onContainerExit listener failed');
+        }
       }
       try {
         this.drainGroup(groupJid);

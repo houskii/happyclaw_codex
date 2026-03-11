@@ -31,6 +31,7 @@ import {
   QQConfigSchema,
   WeChatConfigSchema,
   DingTalkConfigSchema,
+  MemoryModeSchema,
   RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
@@ -78,7 +79,13 @@ import {
   saveUserWeChatConfig,
   getUserDingTalkConfig,
   saveUserDingTalkConfig,
+  getUserMemoryMode,
+  saveUserMemoryMode,
   updateAllSessionCredentials,
+  saveClaudeOfficialProviderSecrets,
+  detectLocalClaudeCode,
+  importLocalClaudeCredentials,
+  getCodexMode,
   setCodexMode,
   getCodexProviderConfig,
   detectLocalCodexCli,
@@ -2721,4 +2728,88 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   );
 });
 
+// ─── Per-user memory mode ──────────────────────────────────────────
+
+configRoutes.get('/user-im/memory', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const mode = getUserMemoryMode(user.id);
+    return c.json({ memoryMode: mode });
+  } catch (err) {
+    logger.warn({ err, userId: user.id }, 'Failed to read memory mode');
+    return c.json({ memoryMode: 'legacy' });
+  }
+});
+
+configRoutes.put('/user-im/memory', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const validation = MemoryModeSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request', details: validation.error.issues },
+      400,
+    );
+  }
+  try {
+    saveUserMemoryMode(user.id, validation.data.memoryMode);
+    return c.json({ memoryMode: validation.data.memoryMode });
+  } catch (err) {
+    logger.warn({ err, userId: user.id }, 'Failed to save memory mode');
+    return c.json({ error: 'Failed to save memory mode' }, 500);
+  }
+});
+
+// ─── Local Claude Code detection ──────────────────────────────────
+
+configRoutes.get(
+  '/claude/detect-local',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    return c.json(detectLocalClaudeCode());
+  },
+);
+
+configRoutes.post(
+  '/claude/import-local',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    const creds = importLocalClaudeCredentials();
+    if (!creds) {
+      return c.json({ error: '未检测到本机 Claude Code 登录凭据' }, 404);
+    }
+
+    const actor = (c.get('user') as AuthUser).username;
+
+    try {
+      const saved = saveClaudeOfficialProviderSecrets(
+        {
+          anthropicApiKey: '',
+          claudeCodeOauthToken: '',
+          claudeOAuthCredentials: creds,
+        },
+        {
+          activateOfficial: true,
+        },
+      );
+
+      updateAllSessionCredentials(saved);
+      deps?.queue?.closeAllActiveForCredentialRefresh();
+      appendClaudeConfigAudit(actor, 'import_local_cc', [
+        'claudeOAuthCredentials:import_local',
+      ]);
+
+      return c.json(toPublicClaudeProviderConfig(saved));
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Failed to import local credentials';
+      logger.warn({ err }, 'Failed to import local Claude Code credentials');
+      return c.json({ error: message }, 500);
+    }
+  },
+);
 export default configRoutes;
