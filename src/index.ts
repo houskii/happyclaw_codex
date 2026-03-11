@@ -2082,8 +2082,13 @@ export function formatMessages(
     const channelType = getChannelType(sourceJid);
     let sourceAttr = '';
     if (channelType) {
-      const chatId = extractChatId(sourceJid);
-      sourceAttr = ` source="${escapeXml(channelType)}:${escapeXml(chatId)}"`;
+      const sourceGroup = getRegisteredGroup(sourceJid);
+      if (sourceGroup?.name) {
+        sourceAttr = ` source="${escapeXml(sourceGroup.name)}"`;
+      } else {
+        const chatId = extractChatId(sourceJid);
+        sourceAttr = ` source="${escapeXml(channelType)}:${escapeXml(chatId)}"`;
+      }
     }
     return `<message sender="${escapeXml(m.sender_name)}"${sourceAttr} time="${m.timestamp}">${escapeXml(content)}</message>`;
   });
