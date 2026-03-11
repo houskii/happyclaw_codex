@@ -11,6 +11,10 @@ import {
   TIMEZONE,
 } from './config.js';
 import { DailySummaryDeps, runDailySummaryIfNeeded } from './daily-summary.js';
+import {
+  GlobalSleepDeps,
+  runMemoryGlobalSleepIfNeeded,
+} from './memory-agent.js';
 import { getSystemSettings } from './runtime-config.js';
 import {
   ContainerOutput,
@@ -179,6 +183,7 @@ export interface SchedulerDependencies {
   storePromptMessage?: (chatJid: string, senderId: string, senderName: string, text: string) => void;
   assistantName: string;
   dailySummaryDeps?: DailySummaryDeps;
+  globalSleepDeps?: GlobalSleepDeps;
 }
 
 export interface RunTaskOptions {
@@ -713,6 +718,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           runDailySummaryIfNeeded(deps.dailySummaryDeps);
         } catch (err) {
           logger.error({ err }, 'Daily summary check failed');
+        }
+      }
+
+      // Memory Agent global_sleep (runs after daily summary, 2-3 AM)
+      if (deps.globalSleepDeps) {
+        try {
+          runMemoryGlobalSleepIfNeeded(deps.globalSleepDeps);
+        } catch (err) {
+          logger.error({ err }, 'Memory global_sleep check failed');
         }
       }
 

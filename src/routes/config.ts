@@ -114,6 +114,7 @@ import {
   clearBillingEnabledCache,
 } from '../billing.js';
 import { providerPool } from '../provider-pool.js';
+import { importLegacyMemoryData } from '../memory-agent.js';
 
 const configRoutes = new Hono<{ Variables: Variables }>();
 
@@ -2757,6 +2758,28 @@ configRoutes.put('/user-im/memory', authMiddleware, async (c) => {
   } catch (err) {
     logger.warn({ err, userId: user.id }, 'Failed to save memory mode');
     return c.json({ error: 'Failed to save memory mode' }, 500);
+  }
+});
+
+// POST /api/config/user-im/memory/import-legacy
+// Import old memory system data (CLAUDE.md + daily-summary) into agent memory structure
+configRoutes.post('/user-im/memory/import-legacy', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const result = importLegacyMemoryData(user.id);
+    logger.info(
+      {
+        userId: user.id,
+        imported: result.imported.length,
+        skipped: result.skipped.length,
+        errors: result.errors.length,
+      },
+      'Legacy memory import completed',
+    );
+    return c.json(result);
+  } catch (err) {
+    logger.error({ err, userId: user.id }, 'Legacy memory import failed');
+    return c.json({ error: 'Import failed' }, 500);
   }
 });
 

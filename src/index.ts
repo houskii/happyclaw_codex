@@ -83,6 +83,7 @@ import {
   cleanupOldDailyUsage,
   cleanupOldBillingAuditLog,
   insertUsageRecord,
+  getTranscriptMessagesSince,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
@@ -177,6 +178,14 @@ import {
 import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
 import { executeSessionReset } from './commands.js';
+import {
+  MemoryAgentManager,
+  ensureMemoryDir,
+  readMemoryState,
+  writeMemoryState,
+} from './memory-agent.js';
+import { injectMemoryAgentDeps } from './routes/memory-agent.js';
+import { getUserMemoryMode } from './runtime-config.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
@@ -3431,6 +3440,7 @@ async function runAgent(
           isHome,
           isAdminHome,
           images,
+          userId: group.created_by,
         },
         onProcessCb,
         wrappedOnOutput,
@@ -3449,6 +3459,7 @@ async function runAgent(
           isHome,
           isAdminHome,
           images,
+          userId: group.created_by,
         },
         onProcessCb,
         wrappedOnOutput,
@@ -6873,6 +6884,160 @@ function migrateGlobalMemoryToPerUser(): void {
   }
 }
 
+// --- Transcript export for Memory Agent ---
+
+interface TranscriptMessage {
+  id: string;
+  chat_jid: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: boolean;
+}
+
+function formatTranscriptMarkdown(
+  messages: TranscriptMessage[],
+  folder: string,
+): string {
+  if (messages.length === 0) return '';
+
+  const firstTs = messages[0].timestamp;
+  const lastTs = messages[messages.length - 1].timestamp;
+  const formatTime = (ts: string) => {
+    try {
+      return new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+    } catch {
+      return ts;
+    }
+  };
+
+  const lines: string[] = [
+    `# 对话记录 — ${folder}`,
+    `时间范围：${formatTime(firstTs)} ~ ${formatTime(lastTs)}`,
+    `消息数：${messages.length}`,
+    '',
+    '---',
+    '',
+  ];
+
+  for (const msg of messages) {
+    const role = msg.is_from_me ? 'Agent' : msg.sender_name || 'User';
+    const time = formatTime(msg.timestamp);
+    // Truncate very long messages to keep transcripts manageable
+    const content =
+      msg.content.length > 2000
+        ? msg.content.slice(0, 2000) + '\n\n[...内容截断...]'
+        : msg.content;
+    lines.push(`**${role}** (${time}): ${content}`, '');
+  }
+
+  return lines.join('\n');
+}
+
+function exportTranscriptsForUser(
+  userId: string,
+  folder: string,
+  chatJids: string[],
+  memoryAgentManager: MemoryAgentManager,
+): void {
+  try {
+    const memDir = ensureMemoryDir(userId);
+    const state = readMemoryState(userId);
+    const wrapups = (state.lastSessionWrapups || {}) as Record<
+      string,
+      MessageCursor
+    >;
+    const defaultCursor: MessageCursor = {
+      timestamp: '1970-01-01T00:00:00Z',
+      id: '',
+    };
+
+    // Collect all messages from all associated chatJids
+    const allMessages: TranscriptMessage[] = [];
+    for (const jid of chatJids) {
+      const cursor = wrapups[jid] || defaultCursor;
+      const msgs = getTranscriptMessagesSince(jid, cursor);
+      allMessages.push(
+        ...msgs.map((m) => ({
+          id: m.id,
+          chat_jid: m.chat_jid,
+          sender_name: m.sender_name,
+          content: m.content,
+          timestamp: m.timestamp,
+          is_from_me: !!m.is_from_me,
+        })),
+      );
+    }
+
+    if (allMessages.length === 0) {
+      logger.debug({ userId, folder }, 'No new messages for transcript export');
+      return;
+    }
+
+    // Sort by time, then by id for stable ordering
+    allMessages.sort(
+      (a, b) =>
+        a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id),
+    );
+
+    const md = formatTranscriptMarkdown(allMessages, folder);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `${folder}-${Date.now()}.md`;
+    const transcriptRelPath = path.join('transcripts', dateStr, filename);
+    const fullPath = path.join(memDir, transcriptRelPath);
+
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    // Atomic write
+    const tmp = `${fullPath}.tmp`;
+    fs.writeFileSync(tmp, md, 'utf-8');
+    fs.renameSync(tmp, fullPath);
+
+    logger.info(
+      {
+        userId,
+        folder,
+        messageCount: allMessages.length,
+        path: transcriptRelPath,
+      },
+      'Exported transcript for Memory Agent',
+    );
+
+    // Update cursors for all chatJids to the last message
+    const lastMsg = allMessages[allMessages.length - 1];
+    for (const jid of chatJids) {
+      wrapups[jid] = { timestamp: lastMsg.timestamp, id: lastMsg.id };
+    }
+    state.lastSessionWrapups = wrapups;
+    // Track pending wrapups for global_sleep scheduling
+    const pending = (state.pendingWrapups || []) as string[];
+    if (!pending.includes(folder)) {
+      pending.push(folder);
+      state.pendingWrapups = pending;
+    }
+    writeMemoryState(userId, state);
+
+    // Trigger session_wrapup (fire-and-forget, don't block container exit)
+    memoryAgentManager
+      .send(userId, {
+        type: 'session_wrapup',
+        transcriptFile: transcriptRelPath,
+        groupFolder: folder,
+        chatJids,
+      })
+      .catch((err) => {
+        logger.warn(
+          { userId, folder, err },
+          'Memory Agent session_wrapup failed (non-blocking)',
+        );
+      });
+  } catch (err) {
+    logger.error(
+      { userId, folder, err },
+      'Failed to export transcript for Memory Agent',
+    );
+  }
+}
+
 async function main(): Promise<void> {
   migrateDataDirectories();
   initDatabase();
@@ -6922,6 +7087,30 @@ async function main(): Promise<void> {
 
   loadState();
 
+  // --- Memory Agent Manager ---
+  const memoryAgentManager = new MemoryAgentManager();
+  const memoryAgentToken = crypto.randomBytes(32).toString('hex');
+  injectMemoryAgentDeps({ manager: memoryAgentManager, token: memoryAgentToken });
+  memoryAgentManager.startIdleChecks();
+  logger.info('Memory Agent Manager initialized');
+
+  // --- Memory Agent: transcript export on container exit (Phase 2-B/2-C) ---
+  queue.addOnContainerExitListener((groupJid: string) => {
+    const group = registeredGroups[groupJid] ?? getRegisteredGroup(groupJid);
+    if (!group?.is_home || !group.created_by) return;
+
+    const memoryMode = getUserMemoryMode(group.created_by);
+    if (memoryMode !== 'agent') return;
+
+    const allJids = getJidsByFolder(group.folder);
+    exportTranscriptsForUser(
+      group.created_by,
+      group.folder,
+      allJids,
+      memoryAgentManager,
+    );
+  });
+
   // --- Channel reload helpers (hot-reload on config save) ---
 
   let feishuSyncInterval: ReturnType<typeof setInterval> | null = null;
@@ -6963,7 +7152,6 @@ async function main(): Promise<void> {
     } catch (err) {
       logger.warn({ err }, 'Error shutting down terminals');
     }
-
     // Stop periodic buffer, then persist streaming text to DB + clean buffer files.
     stopStreamingBuffer();
     saveInterruptedStreamingMessages();
@@ -6993,7 +7181,11 @@ async function main(): Promise<void> {
     ]);
 
     clearTimeout(forceExitTimer);
-
+    try {
+      await memoryAgentManager.shutdownAll();
+    } catch (err) {
+      logger.warn({ err }, 'Error shutting down Memory Agents');
+    }
     try {
       closeDatabase();
     } catch (err) {
@@ -7651,6 +7843,10 @@ async function main(): Promise<void> {
       logger,
       dataDir: DATA_DIR,
     },
+    globalSleepDeps: {
+      manager: memoryAgentManager,
+      queue,
+    },
   };
   startSchedulerLoop(schedulerDeps);
 
@@ -7660,7 +7856,6 @@ async function main(): Promise<void> {
     webDeps.triggerTaskRun = (taskId: string) =>
       triggerTaskNow(taskId, schedulerDeps);
   }
-
   startIpcWatcher();
   recoverStreamingBuffer();
   recoverPendingMessages();

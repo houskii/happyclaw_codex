@@ -10,12 +10,10 @@
 
 import fs from 'fs';
 import path from 'path';
-import { PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 
 import type { ContainerInput, ContainerOutput } from './types.js';
 export type { StreamEventType, StreamEvent } from './types.js';
 
-import { normalizeHomeFlags } from 'happyclaw-agent-runner-core';
 import { SessionState } from './session-state.js';
 import {
   buildIpcPaths,
@@ -74,6 +72,7 @@ async function readStdin(): Promise<string> {
 // User MCP servers loader
 // ---------------------------------------------------------------------------
 
+/** 从 settings.json 读取用户配置的 MCP servers（stdio/http/sse 类型） */
 function loadUserMcpServers(): Record<string, unknown> {
   const settingsDir = process.env.HAPPYCLAW_WORKSPACE_SESSION
     ? path.join(process.env.HAPPYCLAW_WORKSPACE_SESSION, '.claude')

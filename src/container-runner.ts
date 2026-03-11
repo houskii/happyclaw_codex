@@ -28,6 +28,7 @@ import {
   getCodexProviderConfig,
   syncCodexAuthToSession,
   getSystemSettings,
+  getUserMemoryMode,
   mergeClaudeEnvConfig,
   resolveProviderById,
   shellQuoteEnvLines,
@@ -37,6 +38,7 @@ import { providerPool } from './provider-pool.js';
 import { isApiError } from './agent-output-parser.js';
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { loadUserMcpServers } from './mcp-utils.js';
+import { getInternalToken } from './routes/memory-agent.js';
 import { MessageSourceKind, RegisteredGroup, StreamEvent } from './types.js';
 import {
   attachStderrHandler,
@@ -1070,7 +1072,6 @@ export async function runHostAgent(
   const hostPoolResult = trySelectPoolProvider(group.folder);
   const hostSelectedProfileId = hostPoolResult?.profileId ?? null;
   const globalConfig = hostPoolResult?.resolved.config ?? getClaudeProviderConfig();
-
   try {
     // 配置层环境变量
     const envLines = buildContainerEnvLines(

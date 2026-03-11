@@ -101,11 +101,12 @@ function resolveMemoryPath(
         throw new Error('Memory path out of allowed scope');
       }
     }
-    // data/memory/{folder}/... — check group ownership
+    // data/memory/{key}/... — agent memory uses userId as key, legacy uses folder
     else if (inMemoryData) {
       const relToMemory = path.relative(MEMORY_DATA_DIR, absolute);
-      const folder = relToMemory.split(path.sep)[0];
-      if (!isUserOwnedFolder(user, folder)) {
+      const memoryOwner = relToMemory.split(path.sep)[0];
+      // Allow if the key matches the user's own ID (agent memory: data/memory/{userId}/)
+      if (memoryOwner !== user.id && !isUserOwnedFolder(user, memoryOwner)) {
         throw new Error('Memory path out of allowed scope');
       }
     }
@@ -128,6 +129,25 @@ function isUserOwnedFolder(
     }
   }
   return false;
+}
+
+function classifyAgentMemoryLabel(ownerLabel: string, subPath: string): string {
+  if (!subPath || subPath === 'index.md') return `${ownerLabel} / 随身索引`;
+  if (subPath === 'personality.md') return `${ownerLabel} / 性格记录`;
+  if (subPath === 'state.json') return `${ownerLabel} / 系统元数据`;
+  if (subPath.startsWith('knowledge/')) {
+    const name = subPath.slice('knowledge/'.length);
+    return `${ownerLabel} / 知识库 / ${name}`;
+  }
+  if (subPath.startsWith('impressions/')) {
+    const name = subPath.slice('impressions/'.length);
+    return `${ownerLabel} / 印象 / ${name}`;
+  }
+  if (subPath.startsWith('transcripts/')) {
+    const name = subPath.slice('transcripts/'.length);
+    return `${ownerLabel} / 对话记录 / ${name}`;
+  }
+  return `${ownerLabel} / ${subPath}`;
 }
 
 function classifyMemorySource(
@@ -159,15 +179,31 @@ function classifyMemorySource(
       ownerName: ownerLabel,
     };
   }
-
   // data/memory/{folder}/...
   if (parts[0] === 'data' && parts[1] === 'memory') {
-    const folder = parts[2] || 'unknown';
-    const name = parts.slice(3).join('/') || 'memory';
+    const key = parts[2] || 'unknown';
+    const subPath = parts.slice(3).join('/') || '';
+
+    // Check if this is an agent memory directory (has index.md)
+    const indexCheck = path.join(MEMORY_DATA_DIR, key, 'index.md');
+    if (fs.existsSync(indexCheck)) {
+      // Agent memory: data/memory/{userId}/...
+      const owner = getUserById(key);
+      const ownerLabel = owner ? owner.display_name || owner.username : key;
+      const label = classifyAgentMemoryLabel(ownerLabel, subPath);
+      return {
+        type: 'date',
+        label,
+        ownerName: ownerLabel,
+      };
+    }
+
+    // Legacy date memory: data/memory/{folder}/...
+    const name = subPath || 'memory';
     return {
       type: 'date',
-      label: `${folder} / 日期记忆 / ${name}`,
-      folder,
+      label: `${key} / 日期记忆 / ${name}`,
+      folder: key,
     };
   }
 
@@ -359,11 +395,11 @@ function listMemorySources(user: AuthUser): MemorySource[] {
     }
   }
 
-  // 4. Scan data/memory/ (date memory files)
+  // 4. Scan data/memory/ (date memory files + per-user memory index files)
   if (fs.existsSync(MEMORY_DATA_DIR)) {
     const memFolders = fs.readdirSync(MEMORY_DATA_DIR, { withFileTypes: true });
     for (const d of memFolders) {
-      if (d.isDirectory() && (isAdmin || accessibleFolders.has(d.name))) {
+      if (d.isDirectory() && (isAdmin || accessibleFolders.has(d.name) || d.name === user.id)) {
         const scanned: string[] = [];
         walkFiles(
           path.join(MEMORY_DATA_DIR, d.name),

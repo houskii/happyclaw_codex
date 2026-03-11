@@ -1,7 +1,7 @@
 .PHONY: dev dev-backend dev-web build build-backend build-web start \
-       typecheck typecheck-backend typecheck-web typecheck-agent-runner \
+       typecheck typecheck-backend typecheck-web typecheck-agent-runner typecheck-memory-agent \
        format format-check install clean reset-init update-sdk ensure-latest-sdk sync-types \
-       backup restore help _ensure-docker-image
+       backup restore help _ensure-docker-image build-memory-agent
 
 # ─── Runtime Detection ──────────────────────────────────────
 # 优先使用 bun（跳过编译、启动更快），fallback 到 npm + tsx + node
@@ -25,6 +25,7 @@ dev: ## 启动前后端（首次自动安装依赖和构建容器镜像）
 	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
 	@$(PKG) --prefix container/agent-runner run build --silent 2>/dev/null || $(PKG) --prefix container/agent-runner run build
+	@npm --prefix container/memory-agent run build --silent 2>/dev/null || npm --prefix container/memory-agent run build
 	@echo "🚀 使用 $(PKG) 启动..."
 	$(PKG) run dev:all
 
@@ -38,6 +39,8 @@ dev-web: ## 仅启动前端
 
 build: sync-types ## 编译前后端及 agent-runner
 	$(PKG) run build:all
+	@$(PKG) --prefix container/agent-runner run build --silent 2>/dev/null || $(PKG) --prefix container/agent-runner run build
+	@npm --prefix container/memory-agent run build --silent 2>/dev/null || npm --prefix container/memory-agent run build
 	@touch .build-sentinel
 
 build-backend: ## 仅编译后端
@@ -45,6 +48,9 @@ build-backend: ## 仅编译后端
 
 build-web: ## 仅编译前端
 	cd web && $(PKG) run build
+
+build-memory-agent: ## 仅编译 memory-agent
+	npm --prefix container/memory-agent run build
 
 # ─── Production ──────────────────────────────────────────────
 
@@ -115,7 +121,7 @@ endif
 
 # ─── Quality ─────────────────────────────────────────────────
 
-typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner ## 全量类型检查
+typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner typecheck-memory-agent ## 全量类型检查
 	@./scripts/check-stream-event-sync.sh
 
 typecheck-backend:
@@ -129,6 +135,9 @@ typecheck-agent-runner:
 
 test: ## 运行单元测试
 	bun test
+
+typecheck-memory-agent:
+	cd container/memory-agent && npx tsc --noEmit
 
 format: ## 格式化代码
 	$(PKG) run format
@@ -193,14 +202,17 @@ install: ## 安装全部依赖并编译 agent-runner
 	@chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true
 	cd container/agent-runner && $(PKG) install
 	cd container/agent-runner && $(PKG) run build
+	npm --prefix container/memory-agent install
+	npm --prefix container/memory-agent run build
 	cd web && $(PKG) install
-	@touch node_modules web/node_modules container/agent-runner/node_modules
+	@touch node_modules web/node_modules container/agent-runner/node_modules container/memory-agent/node_modules
 
 clean: ## 清理构建产物
 	rm -rf dist
 	rm -rf web/dist
 	rm -rf container/agent-runner/dist
 	rm -f .build-sentinel
+	rm -rf container/memory-agent/dist
 
 reset-init: ## 完全重置为首装状态（清空所有运行时数据）
 	rm -rf data store groups
