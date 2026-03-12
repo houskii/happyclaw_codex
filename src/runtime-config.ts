@@ -2032,6 +2032,11 @@ export function buildContainerEnvLines(
 /**
  * Write .credentials.json to a Claude session directory.
  * Format matches what Claude Code CLI/Agent SDK natively reads.
+ *
+ * IMPORTANT: Skips overwrite if the on-disk file has a newer `expiresAt` than
+ * what we're about to write. This prevents overwriting tokens that the SDK's
+ * CLI process has already refreshed (OAuth refresh tokens are single-use, so
+ * overwriting with stale tokens would break authentication for all new processes).
  */
 export function writeCredentialsFile(
   sessionDir: string,
@@ -2039,6 +2044,21 @@ export function writeCredentialsFile(
 ): void {
   const creds = config.claudeOAuthCredentials;
   if (!creds) return;
+
+  const filePath = path.join(sessionDir, '.credentials.json');
+
+  // Don't overwrite if on-disk credentials are newer (refreshed by CLI)
+  try {
+    if (fs.existsSync(filePath)) {
+      const existing = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const existingExpiresAt = existing?.claudeAiOauth?.expiresAt;
+      if (typeof existingExpiresAt === 'number' && existingExpiresAt > creds.expiresAt) {
+        return; // on-disk is newer, don't overwrite
+      }
+    }
+  } catch {
+    // Can't read existing file — proceed with write
+  }
 
   const credentialsData = {
     claudeAiOauth: {
@@ -2049,7 +2069,6 @@ export function writeCredentialsFile(
     },
   };
 
-  const filePath = path.join(sessionDir, '.credentials.json');
   const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(credentialsData, null, 2) + '\n', {
     encoding: 'utf-8',

@@ -4,6 +4,12 @@
  * A lightweight per-user memory management agent that runs as a child process
  * of the main HappyClaw server. Communicates via stdin/stdout JSON lines.
  *
+ * Architecture:
+ *   Uses a PERSISTENT query() with AsyncIterable<SDKUserMessage> prompt,
+ *   keeping a single long-lived CLI process. This avoids spawning a new CLI
+ *   per request, which would fail OAuth token refresh (refresh tokens are
+ *   single-use, and the main agent's CLI may have already consumed it).
+ *
  * Protocol:
  *   stdin:  One JSON object per line (newline-delimited)
  *   stdout: One JSON response per line (matched by requestId)
@@ -16,7 +22,7 @@
  *   - global_sleep:   Nightly maintenance (async, no response expected)
  */
 
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import readline from 'readline';
 import fs from 'fs';
 import path from 'path';
@@ -24,9 +30,12 @@ import path from 'path';
 const MEMORY_DIR = process.env.HAPPYCLAW_MEMORY_DIR || process.cwd();
 const MODEL = process.env.HAPPYCLAW_MODEL === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6';
 
-// Maximum tool-call turns per request (prevents runaway loops)
-const MAX_TURNS_DEFAULT = 15;
-const MAX_TURNS_GLOBAL_SLEEP = 30; // global_sleep needs more turns for deep maintenance
+// Safety net for total turns in the persistent session.
+// Individual request limits are enforced by natural completion behavior.
+const MAX_TURNS = 500;
+
+// Restart the query after this many requests to prevent context overflow.
+const MAX_REQUESTS_PER_SESSION = 20;
 
 interface MemoryRequest {
   requestId: string;
@@ -50,9 +59,59 @@ interface MemoryResponse {
   error?: string;
 }
 
+interface RequestResult {
+  text: string;
+  isError: boolean;
+}
+
 function log(msg: string): void {
   process.stderr.write(`[memory-agent] ${msg}\n`);
 }
+
+// ─── MessageStream ─────────────────────────────────────────────────
+// Push-based async iterable for streaming user messages to the SDK.
+// Keeps the iterable alive until end() is called.
+
+interface SDKUserMessage {
+  type: 'user';
+  message: { role: 'user'; content: string };
+  parent_tool_use_id: string | null;
+  session_id: string;
+}
+
+class MessageStream {
+  private queue: SDKUserMessage[] = [];
+  private waiting: (() => void) | null = null;
+  private done = false;
+
+  push(text: string): void {
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  end(): void {
+    this.done = true;
+    this.waiting?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
+    while (true) {
+      while (this.queue.length > 0) {
+        yield this.queue.shift()!;
+      }
+      if (this.done) return;
+      await new Promise<void>(r => { this.waiting = r; });
+      this.waiting = null;
+    }
+  }
+}
+
+// ─── System Prompt ─────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `你是一个记忆管理系统。你的职责是管理和维护用户的长期记忆。
 
@@ -163,6 +222,8 @@ const SYSTEM_PROMPT = `你是一个记忆管理系统。你的职责是管理和
 - global_sleep 完成后必须更新 state.json（lastGlobalSleep + 清空 pendingWrapups）
 `;
 
+// ─── Prompt Builder ────────────────────────────────────────────────
+
 function buildPrompt(request: MemoryRequest): string {
   switch (request.type) {
     case 'query':
@@ -227,81 +288,76 @@ function buildPrompt(request: MemoryRequest): string {
   }
 }
 
-function extractFinalText(result: unknown): string {
-  // The SDK query() returns a result object. Extract the text content.
-  if (result && typeof result === 'object') {
-    // result.result contains the conversation messages
-    const r = result as Record<string, unknown>;
+// ─── Persistent Query Session ──────────────────────────────────────
 
-    // Try to get the last assistant text from the result
-    if (typeof r.result === 'string') return r.result;
+/** Active query session state */
+interface Session {
+  query: Query;
+  stream: MessageStream;
+  requestCount: number;
+  /** Resolves when the query's for-await loop finishes (CLI died or stream ended) */
+  done: Promise<void>;
+}
 
-    // Handle array of messages
-    if (Array.isArray(r.result)) {
-      // Find the last assistant message with text content
-      for (let i = r.result.length - 1; i >= 0; i--) {
-        const msg = r.result[i];
-        if (msg && typeof msg === 'object' && msg.role === 'assistant') {
-          if (typeof msg.content === 'string') return msg.content;
-          if (Array.isArray(msg.content)) {
-            const textBlocks = msg.content
-              .filter((b: { type: string }) => b.type === 'text')
-              .map((b: { text: string }) => b.text);
-            if (textBlocks.length > 0) return textBlocks.join('\n');
-          }
+/** Pending result slot — only one request in flight at a time */
+let pendingResolve: ((result: RequestResult) => void) | null = null;
+
+/** Consume SDK messages from the query generator, routing results to the pending promise. */
+async function consumeQuery(q: Query): Promise<void> {
+  try {
+    for await (const message of q) {
+      if (message.type === 'result') {
+        const r = message as Record<string, unknown>;
+        const text = typeof r.result === 'string' ? r.result : '';
+        const isError = !!r.is_error;
+        if (pendingResolve) {
+          pendingResolve({ text, isError });
+          pendingResolve = null;
         }
       }
     }
-
-    // Fallback: try resultText or outputText
-    if (typeof r.resultText === 'string') return r.resultText;
-    if (typeof r.outputText === 'string') return r.outputText;
-  }
-
-  return '记忆系统处理完成，但未返回文本结果。';
-}
-
-async function handleRequest(request: MemoryRequest): Promise<MemoryResponse> {
-  const prompt = buildPrompt(request);
-  const maxTurns =
-    request.type === 'global_sleep' ? MAX_TURNS_GLOBAL_SLEEP : MAX_TURNS_DEFAULT;
-
-  try {
-    const result = await query({
-      prompt,
-      options: {
-        model: MODEL,
-        cwd: MEMORY_DIR,
-        systemPrompt: SYSTEM_PROMPT,
-        maxTurns,
-        permissionMode: 'bypassPermissions',
-        allowedTools: [
-          'Read',
-          'Write',
-          'Edit',
-          'Grep',
-          'Glob',
-        ],
-      },
-    });
-
-    const response = extractFinalText(result);
-
-    return {
-      requestId: request.requestId,
-      success: true,
-      response,
-    };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`Error handling ${request.type} request: ${message}`);
-    return {
-      requestId: request.requestId,
-      success: false,
-      error: message,
-    };
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log(`Query consumer error: ${errMsg}`);
+    if (pendingResolve) {
+      pendingResolve({ text: errMsg, isError: true });
+      pendingResolve = null;
+    }
   }
 }
+
+function waitForResult(): Promise<RequestResult> {
+  return new Promise(resolve => { pendingResolve = resolve; });
+}
+
+function startSession(): Session {
+  const stream = new MessageStream();
+  const q = query({
+    prompt: stream,
+    options: {
+      model: MODEL,
+      cwd: MEMORY_DIR,
+      systemPrompt: SYSTEM_PROMPT,
+      maxTurns: MAX_TURNS,
+      permissionMode: 'bypassPermissions',
+      allowedTools: [
+        'Read',
+        'Write',
+        'Edit',
+        'Grep',
+        'Glob',
+      ],
+    },
+  });
+  const done = consumeQuery(q);
+  return { query: q, stream, requestCount: 0, done };
+}
+
+function stopSession(session: Session): void {
+  session.stream.end();
+}
+
+// ─── Main ──────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   log(`Starting Memory Agent (model: ${MODEL}, dir: ${MEMORY_DIR})`);
@@ -316,6 +372,9 @@ async function main(): Promise<void> {
     terminal: false,
   });
 
+  let session: Session | null = null;
+  let sessionDied = false;
+
   for await (const line of rl) {
     if (!line.trim()) continue;
 
@@ -324,7 +383,7 @@ async function main(): Promise<void> {
       request = JSON.parse(line);
     } catch (err) {
       log(`Invalid JSON input: ${err instanceof Error ? err.message : String(err)}`);
-      continue; // Don't crash, wait for next line
+      continue;
     }
 
     if (!request.requestId || !request.type) {
@@ -334,14 +393,56 @@ async function main(): Promise<void> {
 
     log(`Handling ${request.type} request (id: ${request.requestId})`);
 
-    const response = await handleRequest(request);
+    // Start or restart session if needed
+    if (!session || sessionDied || session.requestCount >= MAX_REQUESTS_PER_SESSION) {
+      if (session) {
+        log(`Recycling session (requests: ${session.requestCount}, died: ${sessionDied})`);
+        stopSession(session);
+        await session.done;
+      }
+      log('Starting new query session');
+      session = startSession();
+      sessionDied = false;
 
-    // Write response as a single JSON line to stdout
+      // Monitor session death in background
+      session.done.then(() => {
+        sessionDied = true;
+      });
+    }
+
+    // Push prompt and wait for result
+    const prompt = buildPrompt(request);
+    const resultPromise = waitForResult();
+    session.stream.push(prompt);
+    session.requestCount++;
+
+    const result = await resultPromise;
+
+    let response: MemoryResponse;
+    if (result.isError) {
+      log(`Error handling ${request.type} request: ${result.text.slice(0, 200)}`);
+      response = {
+        requestId: request.requestId,
+        success: false,
+        error: result.text,
+      };
+    } else {
+      response = {
+        requestId: request.requestId,
+        success: true,
+        response: result.text || '记忆系统处理完成，但未返回文本结果。',
+      };
+    }
+
     process.stdout.write(JSON.stringify(response) + '\n');
-
     log(`Completed ${request.type} request (id: ${request.requestId}, success: ${response.success})`);
   }
 
+  // stdin closed — clean up
+  if (session) {
+    stopSession(session);
+    await session.done;
+  }
   log('stdin closed, exiting');
 }
 
