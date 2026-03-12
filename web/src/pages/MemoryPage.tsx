@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, Download, Loader2, Moon, Play, RefreshCw, Save } from 'lucide-react';
+import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, Download, Loader2, Moon, Play, RefreshCw, Save, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import { useGroupsStore } from '../stores/groups';
@@ -168,6 +168,14 @@ export function MemoryPage() {
   } | null>(null);
   const [triggeringWrapup, setTriggeringWrapup] = useState(false);
   const [triggeringGlobalSleep, setTriggeringGlobalSleep] = useState(false);
+  const [showTimeouts, setShowTimeouts] = useState(false);
+  const [timeoutValues, setTimeoutValues] = useState<{
+    memoryQueryTimeout: number;
+    memoryGlobalSleepTimeout: number;
+    memorySendTimeout: number;
+  } | null>(null);
+  const [timeoutLoading, setTimeoutLoading] = useState(false);
+  const [timeoutSaving, setTimeoutSaving] = useState(false);
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [showContent, setShowContent] = useState(false);
 
@@ -391,6 +399,50 @@ export function MemoryPage() {
       setError(getErrorMessage(err, '深度整理失败'));
     } finally {
       setTriggeringGlobalSleep(false);
+    }
+  };
+
+  const loadTimeoutSettings = useCallback(async () => {
+    setTimeoutLoading(true);
+    try {
+      const data = await api.get<{
+        memoryQueryTimeout: number;
+        memoryGlobalSleepTimeout: number;
+        memorySendTimeout: number;
+      }>('/api/config/system');
+      setTimeoutValues({
+        memoryQueryTimeout: data.memoryQueryTimeout,
+        memoryGlobalSleepTimeout: data.memoryGlobalSleepTimeout,
+        memorySendTimeout: data.memorySendTimeout,
+      });
+    } catch (err) {
+      toast.error(getErrorMessage(err, '加载超时设置失败'));
+    } finally {
+      setTimeoutLoading(false);
+    }
+  }, []);
+
+  const handleSaveTimeouts = async () => {
+    if (!timeoutValues) return;
+    setTimeoutSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const data = await api.put<{
+        memoryQueryTimeout: number;
+        memoryGlobalSleepTimeout: number;
+        memorySendTimeout: number;
+      }>('/api/config/system', timeoutValues);
+      setTimeoutValues({
+        memoryQueryTimeout: data.memoryQueryTimeout,
+        memoryGlobalSleepTimeout: data.memoryGlobalSleepTimeout,
+        memorySendTimeout: data.memorySendTimeout,
+      });
+      setNotice('超时设置已保存');
+    } catch (err) {
+      setError(getErrorMessage(err, '保存超时设置失败'));
+    } finally {
+      setTimeoutSaving(false);
     }
   };
 
@@ -649,6 +701,136 @@ export function MemoryPage() {
                         </div>
                       </div>
                     )}
+
+                    <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = !showTimeouts;
+                          setShowTimeouts(next);
+                          if (next && !timeoutValues && !timeoutLoading) {
+                            void loadTimeoutSettings();
+                          }
+                        }}
+                        className="flex w-full items-center justify-between text-left"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Settings className="size-4 text-muted-foreground" />
+                          <div>
+                            <div className="text-xs font-medium text-foreground">超时设置</div>
+                            <div className="text-[11px] text-muted-foreground">
+                              调整记忆检索、发送与深度整理的超时时间
+                            </div>
+                          </div>
+                        </div>
+                        {showTimeouts ? (
+                          <ChevronDown className="size-4 text-muted-foreground" />
+                        ) : (
+                          <ChevronRight className="size-4 text-muted-foreground" />
+                        )}
+                      </button>
+
+                      {showTimeouts && (
+                        <div className="space-y-3 border-t border-border pt-3">
+                          {timeoutLoading || !timeoutValues ? (
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Loader2 className="size-3.5 animate-spin" />
+                              正在加载超时设置...
+                            </div>
+                          ) : (
+                            <>
+                              <div className="grid gap-3 sm:grid-cols-3">
+                                <div className="space-y-1">
+                                  <label className="text-xs font-medium text-foreground">检索超时</label>
+                                  <Input
+                                    type="number"
+                                    min={10}
+                                    max={300}
+                                    step={5}
+                                    value={Math.round(timeoutValues.memoryQueryTimeout / 1000)}
+                                    onChange={(e) => {
+                                      const seconds = Number(e.target.value);
+                                      if (!Number.isFinite(seconds)) return;
+                                      setTimeoutValues((prev) =>
+                                        prev
+                                          ? {
+                                              ...prev,
+                                              memoryQueryTimeout: Math.max(10, Math.min(300, seconds)) * 1000,
+                                            }
+                                          : prev,
+                                      );
+                                    }}
+                                  />
+                                  <div className="text-[11px] text-muted-foreground">10 到 300 秒</div>
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-xs font-medium text-foreground">发送超时</label>
+                                  <Input
+                                    type="number"
+                                    min={30}
+                                    max={300}
+                                    step={10}
+                                    value={Math.round(timeoutValues.memorySendTimeout / 1000)}
+                                    onChange={(e) => {
+                                      const seconds = Number(e.target.value);
+                                      if (!Number.isFinite(seconds)) return;
+                                      setTimeoutValues((prev) =>
+                                        prev
+                                          ? {
+                                              ...prev,
+                                              memorySendTimeout: Math.max(30, Math.min(300, seconds)) * 1000,
+                                            }
+                                          : prev,
+                                      );
+                                    }}
+                                  />
+                                  <div className="text-[11px] text-muted-foreground">30 到 300 秒</div>
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-xs font-medium text-foreground">深度整理超时</label>
+                                  <Input
+                                    type="number"
+                                    min={60}
+                                    max={600}
+                                    step={30}
+                                    value={Math.round(timeoutValues.memoryGlobalSleepTimeout / 1000)}
+                                    onChange={(e) => {
+                                      const seconds = Number(e.target.value);
+                                      if (!Number.isFinite(seconds)) return;
+                                      setTimeoutValues((prev) =>
+                                        prev
+                                          ? {
+                                              ...prev,
+                                              memoryGlobalSleepTimeout:
+                                                Math.max(60, Math.min(600, seconds)) * 1000,
+                                            }
+                                          : prev,
+                                      );
+                                    }}
+                                  />
+                                  <div className="text-[11px] text-muted-foreground">60 到 600 秒</div>
+                                </div>
+                              </div>
+                              <div className="flex justify-end">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={handleSaveTimeouts}
+                                  disabled={timeoutSaving}
+                                >
+                                  {timeoutSaving ? (
+                                    <Loader2 className="size-3.5 animate-spin" />
+                                  ) : (
+                                    <Save className="size-3.5" />
+                                  )}
+                                  保存超时设置
+                                </Button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 

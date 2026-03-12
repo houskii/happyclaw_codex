@@ -16,7 +16,7 @@ import path from 'path';
 import readline from 'readline';
 
 import { DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
-import { getGroupsByOwner, getTranscriptMessagesSince, listUsers } from './db.js';
+import { getGroupsByOwner, getTranscriptMessagesSince, getUserHomeGroup, listUsers } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { getSystemSettings, getUserMemoryMode } from './runtime-config.js';
@@ -47,6 +47,7 @@ interface AgentEntry {
   proc: ChildProcess;
   pendingQueries: Map<string, PendingQuery>;
   lastActivity: number;
+  stderrBuffer: string[];
 }
 
 export interface MemoryAgentResponse {
@@ -441,6 +442,66 @@ export function exportTranscriptsForUser(
   }
 }
 
+/**
+ * Write a memory agent execution log to the user's home group logs directory.
+ */
+function writeMemoryLog(
+  userId: string,
+  opts: {
+    type: string;
+    startTime: number;
+    status: 'success' | 'error' | 'timeout';
+    exitCode: number;
+    response?: string;
+    stderr: string[];
+    error?: string;
+  },
+): void {
+  try {
+    const homeGroup = getUserHomeGroup(userId);
+    if (!homeGroup) {
+      logger.warn({ userId }, 'Cannot write memory log: no home group found');
+      return;
+    }
+
+    const logsDir = path.join(GROUPS_DIR, homeGroup.folder, 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+
+    const duration = Date.now() - opts.startTime;
+    const timestamp = new Date(opts.startTime).toISOString();
+    const filename = `memory-${opts.startTime}.log`;
+
+    const lines: string[] = [
+      '=== Memory Agent Run Log ===',
+      `Timestamp: ${timestamp}`,
+      `Duration: ${duration}ms`,
+      `Exit Code: ${opts.exitCode}`,
+      `Type: ${opts.type}`,
+      `Status: ${opts.status}`,
+      '',
+      '=== Response ===',
+      opts.response || opts.error || '(no response)',
+      '',
+      '=== Stderr ===',
+      opts.stderr.join('\n') || '(empty)',
+      '',
+    ];
+
+    const content = lines.join('\n');
+    const filePath = path.join(logsDir, filename);
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, content, 'utf-8');
+    fs.renameSync(tmp, filePath);
+
+    logger.info(
+      { userId, filename, type: opts.type, status: opts.status, duration },
+      'Wrote memory agent log',
+    );
+  } catch (err) {
+    logger.error({ userId, err }, 'Failed to write memory agent log');
+  }
+}
+
 export class MemoryAgentManager {
   private agents: Map<string, AgentEntry> = new Map();
   private idleCheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -507,6 +568,7 @@ export class MemoryAgentManager {
       proc,
       pendingQueries: new Map(),
       lastActivity: Date.now(),
+      stderrBuffer: [],
     };
 
     this.agents.set(userId, entry);
@@ -530,11 +592,15 @@ export class MemoryAgentManager {
       }
     });
 
-    // Log stderr
+    // Log stderr and buffer for log files
     proc.stderr?.on('data', (chunk: Buffer) => {
       const text = chunk.toString().trim();
       if (text) {
         logger.debug({ userId }, `[memory-agent:${userId}] ${text}`);
+        entry.stderrBuffer.push(text);
+        if (entry.stderrBuffer.length > 2000) {
+          entry.stderrBuffer.splice(0, entry.stderrBuffer.length - 2000);
+        }
       }
     });
 
@@ -617,22 +683,72 @@ export class MemoryAgentManager {
     // Even fire-and-forget gets a requestId for tracking
     const payload = { ...message, requestId };
 
-    // global_sleep needs more time (up to 5 minutes) due to deep maintenance
-    const timeoutMs = message.type === 'global_sleep' ? 300_000 : 120_000;
+    const settings = getSystemSettings();
+    const timeoutMs = message.type === 'global_sleep'
+      ? settings.memoryGlobalSleepTimeout
+      : settings.memorySendTimeout;
+
+    const msgType = String(message.type || 'unknown');
+    const shouldLog = msgType === 'global_sleep' || msgType === 'session_wrapup';
+    const startTime = Date.now();
+    const stderrStart = entry.stderrBuffer.length;
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         entry.pendingQueries.delete(requestId);
-        reject(new Error('Memory Agent send timeout'));
+        const err = new Error('Memory Agent send timeout');
+        if (shouldLog) {
+          writeMemoryLog(userId, {
+            type: msgType,
+            startTime,
+            status: 'timeout',
+            exitCode: -1,
+            stderr: entry.stderrBuffer.slice(stderrStart),
+            error: err.message,
+          });
+          if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
+        }
+        reject(err);
       }, timeoutMs);
 
-      entry.pendingQueries.set(requestId, { resolve, reject, timeout });
+      const wrappedResolve = (resp: MemoryAgentResponse) => {
+        if (shouldLog) {
+          writeMemoryLog(userId, {
+            type: msgType,
+            startTime,
+            status: resp.success ? 'success' : 'error',
+            exitCode: resp.success ? 0 : 1,
+            response: resp.response,
+            stderr: entry.stderrBuffer.slice(stderrStart),
+            error: resp.error,
+          });
+          if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
+        }
+        resolve(resp);
+      };
+
+      const wrappedReject = (reason: Error) => {
+        if (shouldLog) {
+          writeMemoryLog(userId, {
+            type: msgType,
+            startTime,
+            status: 'error',
+            exitCode: 1,
+            stderr: entry.stderrBuffer.slice(stderrStart),
+            error: reason.message,
+          });
+          if (entry.pendingQueries.size === 0) entry.stderrBuffer.length = 0;
+        }
+        reject(reason);
+      };
+
+      entry.pendingQueries.set(requestId, { resolve: wrappedResolve, reject: wrappedReject, timeout });
 
       entry.proc.stdin!.write(JSON.stringify(payload) + '\n', (err) => {
         if (err) {
           clearTimeout(timeout);
           entry.pendingQueries.delete(requestId);
-          reject(
+          wrappedReject(
             new Error(`Failed to write to Memory Agent stdin: ${err.message}`),
           );
         }

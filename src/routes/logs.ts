@@ -59,7 +59,9 @@ function parseLogHeader(
     timestamp: '',
     duration: 0,
     exitCode: null,
-    filePrefix: filename.startsWith('host') ? 'host' : 'container',
+    filePrefix: filename.startsWith('host') ? 'host'
+      : filename.startsWith('memory') ? 'memory'
+      : 'container',
     fileSize,
   };
 
@@ -83,6 +85,9 @@ function parseLogHeader(
         break;
       case 'Agent Name':
         meta.agentName = value;
+        break;
+      case 'Type':
+        if (!meta.agentName) meta.agentName = value;
         break;
     }
   }

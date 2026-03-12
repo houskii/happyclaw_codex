@@ -61,9 +61,13 @@ function StatusBadge({ exitCode }: { exitCode: number | null }) {
 }
 
 function TypeBadge({ prefix }: { prefix: string }) {
+  const label = prefix === 'host' ? '宿主机' : prefix === 'memory' ? '记忆' : '容器';
+  const color = prefix === 'memory'
+    ? 'bg-purple-100 text-purple-700'
+    : 'bg-blue-100 text-blue-700';
   return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">
-      {prefix === 'host' ? '宿主机' : '容器'}
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${color}`}>
+      {label}
     </span>
   );
 }
