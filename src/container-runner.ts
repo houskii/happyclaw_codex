@@ -443,6 +443,10 @@ function buildVolumeMounts(
       `HAPPYCLAW_API_URL=http://host.docker.internal:${process.env.WEB_PORT || '3000'}`,
     );
 
+    // Keep agent-runner HTTP timeout in sync with the configured memory query timeout.
+    const settings = getSystemSettings();
+    envLines.push(`HAPPYCLAW_MEMORY_QUERY_TIMEOUT=${settings.memoryQueryTimeout}`);
+
 
     // Mount memory directory as read-only for index.md injection
     const memoryIndexDir = path.join(DATA_DIR, 'memory', ownerId);

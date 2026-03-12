@@ -3816,13 +3816,13 @@ export function saveSystemSettings(
   if (merged.billingMinStartBalanceUsd > 1000000)
     merged.billingMinStartBalanceUsd = 1000000;
   if (merged.memoryQueryTimeout < 10000) merged.memoryQueryTimeout = 10000; // min 10s
-  if (merged.memoryQueryTimeout > 300000) merged.memoryQueryTimeout = 300000; // max 5 min
+  if (merged.memoryQueryTimeout > 600000) merged.memoryQueryTimeout = 600000; // max 10 min
   if (merged.memoryGlobalSleepTimeout < 60000)
     merged.memoryGlobalSleepTimeout = 60000; // min 1 min
-  if (merged.memoryGlobalSleepTimeout > 600000)
-    merged.memoryGlobalSleepTimeout = 600000; // max 10 min
+  if (merged.memoryGlobalSleepTimeout > 3600000)
+    merged.memoryGlobalSleepTimeout = 3600000; // max 1 hour
   if (merged.memorySendTimeout < 30000) merged.memorySendTimeout = 30000; // min 30s
-  if (merged.memorySendTimeout > 300000) merged.memorySendTimeout = 300000; // max 5 min
+  if (merged.memorySendTimeout > 3600000) merged.memorySendTimeout = 3600000; // max 1 hour
   if (merged.turnBatchWindowMs < 1000) merged.turnBatchWindowMs = 1000; // min 1s
   if (merged.turnBatchWindowMs > 60000) merged.turnBatchWindowMs = 60000; // max 60s
   if (merged.turnMaxBatchMs < 5000) merged.turnMaxBatchMs = 5000; // min 5s
