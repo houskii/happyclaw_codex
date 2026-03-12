@@ -19,7 +19,13 @@ import { DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getGroupsByOwner, getTranscriptMessagesSince, getUserHomeGroup, listUsers } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
-import { getSystemSettings, getUserMemoryMode } from './runtime-config.js';
+import {
+  buildContainerEnvLines,
+  getClaudeProviderConfig,
+  getContainerEnvConfig,
+  getSystemSettings,
+  getUserMemoryMode,
+} from './runtime-config.js';
 import type { MessageCursor } from './types.js';
 
 // Memory Agent binary location (compiled TypeScript)
@@ -554,12 +560,35 @@ export class MemoryAgentManager {
 
     logger.info({ userId, memDir }, 'Starting Memory Agent process');
 
+    // Build Claude auth env vars (same as host-mode agent)
+    const globalConfig = getClaudeProviderConfig();
+    const containerOverride = getContainerEnvConfig('memory-agent');
+    const envLines = buildContainerEnvLines(globalConfig, containerOverride);
+    const claudeEnv: Record<string, string> = {};
+    for (const line of envLines) {
+      const eqIdx = line.indexOf('=');
+      if (eqIdx > 0) {
+        claudeEnv[line.slice(0, eqIdx)] = line.slice(eqIdx + 1);
+      }
+    }
+
+    // Share the user's home agent session dir so OAuth credentials (auto-refreshed
+    // by the SDK) are shared between the main agent and the memory agent.
+    // This avoids stale refresh tokens — the main agent refreshes on startup and
+    // the memory agent picks up the fresh credentials from the same file.
+    const homeGroup = getUserHomeGroup(userId);
+    const homeFolder = homeGroup?.folder ?? 'main';
+    const configDir = path.join(DATA_DIR, 'sessions', homeFolder, '.claude');
+    fs.mkdirSync(configDir, { recursive: true });
+
     const proc = spawn('node', [MEMORY_AGENT_DIST], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...claudeEnv,
         HAPPYCLAW_MEMORY_DIR: memDir,
         HAPPYCLAW_MODEL: 'sonnet',
+        CLAUDE_CONFIG_DIR: configDir,
       },
       cwd: memDir,
     });
