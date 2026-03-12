@@ -1268,7 +1268,10 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
       body: object,
     ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; status: number; errorMsg: string }> {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 35000);
+      // Read from env var, with a small buffer (add 5s) above the configured server-side timeout
+      const queryTimeoutMs = parseInt(process.env.HAPPYCLAW_MEMORY_QUERY_TIMEOUT || '60000', 10);
+      const httpTimeout = (Number.isFinite(queryTimeoutMs) && queryTimeoutMs > 0 ? queryTimeoutMs : 60000) + 5000;
+      const timeout = setTimeout(() => controller.abort(), httpTimeout);
       try {
         const res = await fetch(`${API_URL}/api/internal/memory${endpoint}`, {
           method: 'POST',

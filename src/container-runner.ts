@@ -333,6 +333,10 @@ function buildVolumeMounts(
       // Docker containers use host.docker.internal to reach the host
       envLines.push(`HAPPYCLAW_API_URL=http://host.docker.internal:${process.env.WEB_PORT || '3000'}`);
 
+      // Pass memory query timeout so agent-runner HTTP timeout stays in sync
+      const settings = getSystemSettings();
+      envLines.push(`HAPPYCLAW_MEMORY_QUERY_TIMEOUT=${settings.memoryQueryTimeout}`);
+
       // Mount memory directory as read-only for index.md injection
       const memoryIndexDir = path.join(DATA_DIR, 'memory', ownerId);
       mkdirForContainer(memoryIndexDir);
@@ -955,6 +959,8 @@ export async function runHostAgent(
       if (token) hostEnv['HAPPYCLAW_INTERNAL_TOKEN'] = token;
       hostEnv['HAPPYCLAW_API_URL'] = `http://localhost:${process.env.WEB_PORT || '3000'}`;
       hostEnv['HAPPYCLAW_WORKSPACE_MEMORY_INDEX'] = path.join(DATA_DIR, 'memory', ownerId);
+      const settings = getSystemSettings();
+      hostEnv['HAPPYCLAW_MEMORY_QUERY_TIMEOUT'] = String(settings.memoryQueryTimeout);
     }
   }
 
