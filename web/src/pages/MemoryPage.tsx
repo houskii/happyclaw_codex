@@ -93,6 +93,8 @@ export function MemoryPage() {
     canTriggerWrapup: boolean;
     canTriggerGlobalSleep: boolean;
     hasActiveSession: boolean;
+    wrapupInProgress: boolean;
+    globalSleepInProgress: boolean;
   } | null>(null);
   const [triggeringWrapup, setTriggeringWrapup] = useState(false);
   const [triggeringGlobalSleep, setTriggeringGlobalSleep] = useState(false);
@@ -259,6 +261,8 @@ export function MemoryPage() {
         canTriggerWrapup: boolean;
         canTriggerGlobalSleep: boolean;
         hasActiveSession: boolean;
+        wrapupInProgress: boolean;
+        globalSleepInProgress: boolean;
       }>('/api/memory/status');
       setMemoryStatus(data);
     } catch {
@@ -294,6 +298,19 @@ export function MemoryPage() {
       setError(getErrorMessage(err, '深度整理失败'));
     } finally {
       setTriggeringGlobalSleep(false);
+    }
+  };
+
+  const handleStopActiveSessions = async () => {
+    if (!confirm('这将停止所有活跃的 Agent 会话，确定吗？')) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.post<{ stopped: number; message: string }>('/api/memory/stop-active-sessions');
+      setNotice(result.message);
+      await loadMemoryStatus();
+    } catch (err) {
+      setError(getErrorMessage(err, '停止会话失败'));
     }
   };
 
@@ -526,12 +543,12 @@ export function MemoryPage() {
                           onClick={handleTriggerWrapup}
                           disabled={triggeringWrapup || !memoryStatus.canTriggerWrapup}
                         >
-                          {triggeringWrapup ? (
+                          {(triggeringWrapup || memoryStatus.wrapupInProgress) ? (
                             <Loader2 className="size-3.5 animate-spin" />
                           ) : (
                             <Play className="w-3.5 h-3.5" />
                           )}
-                          会话整理
+                          {memoryStatus.wrapupInProgress && !triggeringWrapup ? '会话整理中…' : '会话整理'}
                         </Button>
                         <Button
                           variant="outline"
@@ -539,15 +556,21 @@ export function MemoryPage() {
                           onClick={handleTriggerGlobalSleep}
                           disabled={triggeringGlobalSleep || !memoryStatus.canTriggerGlobalSleep}
                         >
-                          {triggeringGlobalSleep ? (
+                          {(triggeringGlobalSleep || memoryStatus.globalSleepInProgress) ? (
                             <Loader2 className="size-3.5 animate-spin" />
                           ) : (
                             <Moon className="w-3.5 h-3.5" />
                           )}
-                          深度整理
+                          {memoryStatus.globalSleepInProgress && !triggeringGlobalSleep ? '深度整理中…' : '深度整理'}
                         </Button>
                         {memoryStatus.hasActiveSession && (
-                          <span className="text-[11px] text-amber-500">有活跃会话</span>
+                          <button
+                            onClick={handleStopActiveSessions}
+                            className="text-[11px] text-amber-500 hover:text-amber-600 underline underline-offset-2 cursor-pointer"
+                            title="点击停止活跃会话以进行深度整理"
+                          >
+                            有活跃会话（点击停止）
+                          </button>
                         )}
                         {triggeringGlobalSleep && (
                           <span className="text-[11px] text-slate-400">深度整理中，可能需要几分钟……</span>
@@ -593,11 +616,11 @@ export function MemoryPage() {
                                     }
                                   }}
                                   min={10}
-                                  max={300}
+                                  max={600}
                                   step={5}
                                   className="max-w-24 text-xs"
                                 />
-                                <span className="text-xs text-slate-400">秒（10-300）</span>
+                                <span className="text-xs text-slate-400">秒（10-600）</span>
                               </div>
                             </div>
                             <div>
@@ -615,11 +638,11 @@ export function MemoryPage() {
                                     }
                                   }}
                                   min={30}
-                                  max={300}
+                                  max={3600}
                                   step={10}
                                   className="max-w-24 text-xs"
                                 />
-                                <span className="text-xs text-slate-400">秒（30-300）</span>
+                                <span className="text-xs text-slate-400">秒（30-3600）</span>
                               </div>
                             </div>
                             <div>
@@ -637,11 +660,11 @@ export function MemoryPage() {
                                     }
                                   }}
                                   min={60}
-                                  max={600}
+                                  max={3600}
                                   step={30}
                                   className="max-w-24 text-xs"
                                 />
-                                <span className="text-xs text-slate-400">秒（60-600）</span>
+                                <span className="text-xs text-slate-400">秒（60-3600）</span>
                               </div>
                             </div>
                             <Button
