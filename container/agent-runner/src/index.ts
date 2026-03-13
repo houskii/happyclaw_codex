@@ -892,7 +892,7 @@ async function runQuery(
     '当用户要求执行耗时较长的批量任务（如批量文件处理、大规模数据操作等），',
     '你应该使用 Task 工具并设置 `run_in_background: true`，让任务在后台运行。',
     '这样用户无需等待，可以继续与你交流其他事项。',
-    '任务结束时你会自动收到通知，届时在对话中向用户汇报即可。',
+    '任务结束时你会自动收到通知，届时使用 send_message 向用户汇报即可。',
     '告知用户：「已为您在后台启动该任务，完成后我会第一时间反馈。现在有其他问题也可以随时问我。」',
   ].join('\n');
 
@@ -910,10 +910,24 @@ async function runQuery(
     '- 如果用户的消息很简短（如打招呼），简洁回应即可，不要用工具列表填充回复。',
   ].join('\n');
 
+  const channelRoutingGuidelines = [
+    '',
+    '## 消息渠道',
+    '',
+    '用户的消息可能来自不同渠道（Web、飞书、Telegram、QQ）。每条消息的 `source` 属性标识了来源渠道。',
+    '',
+    '- **你的文字输出（stdout）仅显示在 Web 界面**，不会自动发送到任何 IM 渠道。',
+    '- 要向 IM 渠道发送消息，使用 `send_message` 工具并指定 `channel` 参数（值取自消息的 `source` 属性）。',
+    '- 发送图片/文件到 IM 时，`send_image` / `send_file` 的 `channel` 参数为必填。',
+    '- 如果所有消息都来自 Web（没有 source 属性），正常回复即可，无需调用 send_message。',
+    '- 同一批消息可能来自不同渠道，根据需要分别回复。',
+  ].join('\n');
+
   const systemPromptAppend = [
     globalClaudeMd,
     heartbeatContent,
     interactionGuidelines,
+    channelRoutingGuidelines,
     memoryRecall,
     outputGuidelines,
     webFetchGuidelines,
@@ -1184,7 +1198,7 @@ async function main(): Promise<void> {
   let prompt = containerInput.prompt;
   let promptImages = containerInput.images;
   if (containerInput.isScheduledTask) {
-    prompt = `[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。]\n\n${prompt}`;
+    prompt = `[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。需要通知用户时请使用 send_message 工具。]\n\n${prompt}`;
   }
   const pendingDrain = drainIpcInput();
   if (pendingDrain.modeChange) {

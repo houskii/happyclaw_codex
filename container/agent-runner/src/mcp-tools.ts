@@ -128,13 +128,22 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     // --- send_message ---
     tool(
       'send_message',
-      "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. Note: when running as a scheduled task, your final output is NOT sent to the user — use this tool if you need to communicate with the user or group.",
-      { text: z.string().describe('The message text to send') },
+      "Send a message to a specific IM channel (Feishu/Telegram/QQ) or as a Web-only message. Your stdout output only appears in the Web UI and is never automatically sent to any IM channel. To reply to an IM user, you MUST use this tool with the channel parameter (taken from the message's source attribute, e.g. 'feishu:oc_xxx', 'telegram:123'). If all messages come from Web (no source attribute), reply normally via stdout without calling this tool.",
+      {
+        text: z.string().describe('The message text to send'),
+        channel: z
+          .string()
+          .optional()
+          .describe(
+            "Target IM channel, taken from the message's source attribute (e.g. 'feishu:oc_xxx', 'telegram:123'). Omit to only display in Web UI.",
+          ),
+      },
       async (args) => {
         const data = {
           type: 'message',
           chatJid: ctx.chatJid,
           text: args.text,
+          targetChannel: args.channel,
           groupFolder: ctx.groupFolder,
           timestamp: new Date().toISOString(),
         };
@@ -146,12 +155,17 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     // --- send_image ---
     tool(
       'send_image',
-      "Send an image file from the workspace to the user or group via IM (Feishu/Telegram). The file must be an image (PNG, JPEG, GIF, WebP, etc.) and must exist in the workspace. Use this when you've generated or downloaded an image and want to share it with the user. Optionally include a caption.",
+      "Send an image file from the workspace to an IM channel (Feishu/Telegram/QQ). The channel parameter is required — images can only be sent to IM channels. The file must be an image (PNG, JPEG, GIF, WebP, etc.) and must exist in the workspace.",
       {
         file_path: z
           .string()
           .describe(
             'Path to the image file in the workspace (relative to workspace root or absolute)',
+          ),
+        channel: z
+          .string()
+          .describe(
+            "Target IM channel (required). Taken from the message's source attribute (e.g. 'feishu:oc_xxx', 'telegram:123').",
           ),
         caption: z
           .string()
@@ -159,19 +173,6 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .describe('Optional caption text to send with the image'),
       },
       async (args) => {
-        // Web channels don't support direct image sending
-        if (ctx.chatJid.startsWith('web:')) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: send_image is not supported for Web channels. Images can only be sent to IM channels (Feishu/Telegram).',
-              },
-            ],
-            isError: true,
-          };
-        }
-
         // Resolve path relative to workspace
         const absPath = path.isAbsolute(args.file_path)
           ? args.file_path
@@ -252,6 +253,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
         const data = {
           type: 'image',
           chatJid: ctx.chatJid,
+          targetChannel: args.channel,
           imageBase64: base64,
           mimeType,
           caption: args.caption || undefined,
@@ -274,7 +276,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     // --- send_file ---
     tool(
       'send_file',
-      `Send a file to the current chat (the user you're talking to) via IM (Feishu/Telegram). The file path is relative to the workspace/group directory.
+      `Send a file to an IM channel (Feishu/Telegram/QQ). The channel parameter is required — files can only be sent to IM channels.
 Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
       {
         filePath: z
@@ -285,21 +287,13 @@ Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
         fileName: z
           .string()
           .describe('File name to display (e.g., "report.pdf")'),
+        channel: z
+          .string()
+          .describe(
+            "Target IM channel (required). Taken from the message's source attribute (e.g. 'feishu:oc_xxx', 'telegram:123').",
+          ),
       },
       async (args) => {
-        // Web channels don't support direct file sending
-        if (ctx.chatJid.startsWith('web:')) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: send_file is not supported for Web channels. Files can only be sent to IM channels (Feishu/Telegram).',
-              },
-            ],
-            isError: true,
-          };
-        }
-
         // Handle both absolute and relative paths
         let resolvedPath: string;
         let relativePath: string;
@@ -365,6 +359,7 @@ Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
         const data = {
           type: 'send_file',
           chatJid: ctx.chatJid,
+          targetChannel: args.channel,
           filePath: relativePath,
           fileName: args.fileName,
           timestamp: new Date().toISOString(),
@@ -394,8 +389,8 @@ CONTEXT MODE (agent mode only) - Choose based on task type:
 \u2022 "group": Task runs in the group's conversation context, with access to chat history.
 \u2022 "isolated": Task runs in a fresh session with no conversation history.
 
-MESSAGING BEHAVIOR - The task output is sent to the user or group.
-\u2022 Agent mode: output is sent via MCP tool or stdout. Use <internal> tags to suppress.
+MESSAGING BEHAVIOR - Task output is NOT automatically sent to users.
+\u2022 Agent mode: use send_message tool with channel parameter to notify users. stdout only appears in Web UI.
 \u2022 Script mode: stdout is sent as the result. stderr is included on failure.
 
 SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
@@ -1316,13 +1311,17 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
             .string()
             .optional()
             .describe('当前对话的简要上下文，帮助记忆系统更准确地搜索'),
+          channel: z
+            .string()
+            .optional()
+            .describe('消息来源渠道（取自 source 属性），用于定位对话上下文'),
         },
         async (args) => {
           const result = await callMemoryAgent('/query', {
             userId: ctx.userId,
             query: args.query,
             context: args.context,
-            chatJid: ctx.chatJid,
+            chatJid: args.channel || ctx.chatJid,
             groupFolder: ctx.groupFolder,
           });
 
@@ -1354,13 +1353,17 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
             .enum(['high', 'normal'])
             .optional()
             .describe('重要性级别，默认 normal'),
+          channel: z
+            .string()
+            .optional()
+            .describe('消息来源渠道（取自 source 属性），用于定位对话上下文'),
         },
         async (args) => {
           const result = await callMemoryAgent('/remember', {
             userId: ctx.userId,
             content: args.content,
             importance: args.importance || 'normal',
-            chatJid: ctx.chatJid,
+            chatJid: args.channel || ctx.chatJid,
             groupFolder: ctx.groupFolder,
           });
 

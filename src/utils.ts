@@ -2,18 +2,6 @@
 
 import { TRUST_PROXY } from './config.js';
 
-/**
- * Strip agent-internal XML tags from output text.
- * Removes `<internal>...</internal>` and `<process>...</process>` blocks
- * that the agent uses for internal reasoning / process tracking.
- */
-export function stripAgentInternalTags(text: string): string {
-  return text
-    .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-    .replace(/<process>[\s\S]*?<\/process>/g, '')
-    .trim();
-}
-
 export function getClientIp(c: any): string {
   if (TRUST_PROXY) {
     const xff = c.req.header('x-forwarded-for');

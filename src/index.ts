@@ -81,9 +81,6 @@ import {
 import { imManager } from './im-manager.js';
 import { getChannelType, extractChatId } from './im-channel.js';
 import {
-  registerStreamingSession,
-  unregisterStreamingSession,
-  hasActiveStreamingSession,
   abortAllStreamingSessions,
 } from './feishu-streaming-card.js';
 import {
@@ -130,7 +127,6 @@ import {
   RegisteredGroup,
 } from './types.js';
 import { logger } from './logger.js';
-import { stripAgentInternalTags } from './utils.js';
 import { normalizeImageAttachments } from './message-attachments.js';
 import {
   startWebServer,
@@ -171,12 +167,6 @@ let shuttingDown = false;
 const queue = new GroupQueue();
 const EMPTY_CURSOR: MessageCursor = { timestamp: '', id: '' };
 const terminalWarmupInFlight = new Set<string>();
-
-// Per-folder reply route updater: lets sendMessage callers update the
-// reply routing of a running processGroupMessages without killing the process.
-// Key is group folder (one active processGroupMessages per folder).
-type ReplyRouteUpdater = (newSourceJid: string | null) => void;
-const activeRouteUpdaters = new Map<string, ReplyRouteUpdater>();
 
 // Track consecutive IM send failures per JID for auto-unbind
 const imSendFailCounts = new Map<string, number>();
@@ -1094,12 +1084,6 @@ async function summarizeWithClaude(transcript: string): Promise<string | null> {
 }
 
 async function setTyping(jid: string, isTyping: boolean): Promise<void> {
-  // Skip Feishu Reaction when a streaming card is active — the card itself
-  // serves as a live typing indicator.
-  if (isTyping && hasActiveStreamingSession(jid)) {
-    broadcastTyping(jid, isTyping);
-    return;
-  }
   await imManager.setTyping(jid, isTyping);
   broadcastTyping(jid, isTyping);
 }
@@ -1526,30 +1510,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  // Direct IM chats reply to themselves. Routed IM messages keep their original
-  // source_jid so workspace-bound conversations can reply back to the sender
-  // without mirroring every Web reply into IM.
-  //
-  // When messages from multiple sources (web + IM) are batched together, only
-  // route replies to IM if ALL messages came from the same IM source. If any
-  // message originated from web, the web user expects replies on web only — do
-  // not broadcast to IM (#99).
-  const directImReply = getChannelType(chatJid) !== null;
-  let replySourceImJid: string | null = null;
-  if (!directImReply) {
-    // chatJid is a web channel — check if ALL messages share the same IM source
-    const firstSourceJid = missedMessages[0]?.source_jid || chatJid;
-    const allSameImSource =
-      getChannelType(firstSourceJid) !== null &&
-      missedMessages.every((m) => (m.source_jid || chatJid) === firstSourceJid);
-    if (allSameImSource) {
-      replySourceImJid = firstSourceJid;
-    }
-  } else {
-    // chatJid is an IM channel — reply directly
-    replySourceImJid = chatJid;
-  }
-
   const shared = isGroupShared(group.folder);
   const prompt = formatMessages(missedMessages, shared);
 
@@ -1560,7 +1520,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     {
       group: group.name,
       messageCount: missedMessages.length,
-      directImReply,
       imageCount: images.length,
       shared,
     },
@@ -1589,48 +1548,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let lastReplyMsgId: string | undefined;
   const queryTaskIds = new Set<string>();
   const lastProcessed = missedMessages[missedMessages.length - 1];
-
-  // ── Feishu Streaming Card ──
-  // Create a streaming session for Feishu channels (typing-machine effect).
-  // Non-Feishu channels get undefined → all streaming logic is no-op.
-  let streamingSessionJid = replySourceImJid ?? chatJid;
-  let streamingSession =
-    imManager.createStreamingSession(streamingSessionJid);
-  let streamingAccumulatedText = '';
-  if (streamingSession) {
-    registerStreamingSession(streamingSessionJid, streamingSession);
-    logger.debug({ chatJid }, 'Streaming card session created for Feishu');
-  }
-
-  // ── Dynamic reply route updater ──
-  // Allows IPC-injected messages (from web.ts / IM polling) to update the
-  // reply routing target without killing the agent process.  This replaces
-  // the old "closeStdin + restart" approach for home groups (#99).
-  activeRouteUpdaters.set(effectiveGroup.folder, (newSourceJid) => {
-    const newImJid =
-      newSourceJid && getChannelType(newSourceJid) ? newSourceJid : null;
-    if (newImJid === replySourceImJid) return; // no change
-    logger.debug(
-      { chatJid, oldRoute: replySourceImJid, newRoute: newImJid },
-      'Reply route updated via IPC injection',
-    );
-    replySourceImJid = newImJid;
-
-    // Rebuild streaming session if the target channel changed
-    const newStreamingJid = replySourceImJid ?? chatJid;
-    if (newStreamingJid !== streamingSessionJid) {
-      if (streamingSession) {
-        if (streamingSession.isActive()) streamingSession.dispose();
-        unregisterStreamingSession(streamingSessionJid);
-      }
-      streamingSessionJid = newStreamingJid;
-      streamingSession = imManager.createStreamingSession(streamingSessionJid);
-      streamingAccumulatedText = '';
-      if (streamingSession) {
-        registerStreamingSession(streamingSessionJid, streamingSession);
-      }
-    }
-  });
 
   const pickRunningTaskForNotification = (): string | null => {
     const runningInQuery = Array.from(queryTaskIds)
@@ -1697,16 +1614,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // 流式事件处理 - 广播 WebSocket + 持久化 SDK Task 生命周期到 DB
         if (result.status === 'stream' && result.streamEvent) {
           broadcastStreamEvent(chatJid, result.streamEvent);
-
-          // ── Feed text_delta into Feishu streaming card ──
-          if (
-            streamingSession &&
-            result.streamEvent.eventType === 'text_delta' &&
-            result.streamEvent.text
-          ) {
-            streamingAccumulatedText += result.streamEvent.text;
-            streamingSession.append(streamingAccumulatedText);
-          }
 
           // Persist SDK Task lifecycle to DB so tabs survive page refresh
           const se = result.streamEvent;
@@ -1931,7 +1838,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             typeof result.result === 'string'
               ? result.result
               : JSON.stringify(result.result);
-          const text = stripAgentInternalTags(raw);
+          const text = raw.trim();
           logger.info(
             { group: group.name },
             `Agent output: ${raw.slice(0, 200)}`,
@@ -1940,64 +1847,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Stop typing indicator before sending — clears the 4s refresh timer
             // so it doesn't keep firing while the agent stays alive in idle state.
             await setTyping(chatJid, false);
-            const localImagePaths = extractLocalImImagePaths(
-              text,
-              effectiveGroup.folder,
-            );
-
-            // ── Complete Feishu streaming card ──
-            // If a streaming card is active, finalize it with the complete text.
-            // The card replaces the normal IM sendMessage for the Feishu channel.
-            let streamingCardHandledIM = false;
-            if (streamingSession?.isActive()) {
-              try {
-                await streamingSession.complete(text);
-                streamingCardHandledIM = true;
-                logger.debug(
-                  { chatJid },
-                  'Streaming card completed with final text',
-                );
-              } catch (err) {
-                logger.warn(
-                  { err, chatJid },
-                  'Streaming card complete failed, falling back to static message',
-                );
-                // Fall through to normal sendMessage
-              }
-            }
-
-            // For direct IM Feishu chats, if streaming card handled the reply,
-            // still store in DB + broadcast to web, but skip IM send.
-            const skipImSend = streamingCardHandledIM && directImReply;
+            // Web 存储 + 广播，不发 IM（模型通过 send_message 工具主动发 IM）
             lastReplyMsgId = await sendMessage(chatJid, text, {
-              sendToIM: directImReply && !skipImSend,
-              localImagePaths,
+              sendToIM: false,
             });
-
-            // For routed IM (web JID with IM source), skip the source channel
-            // if streaming card handled it, but still relay to it otherwise.
-            if (replySourceImJid && replySourceImJid !== chatJid) {
-              if (!streamingCardHandledIM) {
-                sendImWithFailTracking(replySourceImJid, text, localImagePaths);
-              }
-            }
-
-            // Optional mirror mode for explicitly bound IM channels
-            const webJid = chatJid.startsWith('web:')
-              ? chatJid
-              : `web:${effectiveGroup.folder}`;
-            for (const [imJid, g] of Object.entries(registeredGroups)) {
-              if (
-                g.target_main_jid !== webJid ||
-                imJid === chatJid ||
-                imJid === replySourceImJid
-              )
-                continue;
-              if (g.reply_policy !== 'mirror') continue;
-              if (getChannelType(imJid))
-                sendImWithFailTracking(imJid, text, localImagePaths);
-            }
-
             sentReply = true;
             // Persist cursor as soon as a visible reply is emitted.
             // Long-lived runners may stay alive for idleTimeout, and waiting
@@ -2022,21 +1875,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await setTyping(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
-  activeRouteUpdaters.delete(effectiveGroup.folder);
-
-  // ── Streaming card cleanup ──
-  if (streamingSession) {
-    if (streamingSession.isActive()) {
-      // Agent finished without a visible result.result (e.g., error or interrupt)
-      if (hadError || output.status === 'error') {
-        await streamingSession.abort('处理出错').catch(() => {});
-      } else {
-        // Edge case: agent completed with no text output — dispose silently
-        streamingSession.dispose();
-      }
-    }
-    unregisterStreamingSession(streamingSessionJid);
-  }
 
   // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）：无论是否已有回复，都必须重置会话
   const errorForReset = [lastError, output.error].filter(Boolean).join(' ');
@@ -2243,9 +2081,9 @@ async function runTerminalWarmup(chatJid: string): Promise<void> {
           typeof result.result === 'string'
             ? result.result
             : JSON.stringify(result.result);
-        const text = stripAgentInternalTags(raw);
+        const text = raw.trim();
         if (!text || text === warmupReadyToken) return;
-        await sendMessage(chatJid, text);
+        await sendMessage(chatJid, text, { sendToIM: false });
         resetIdleTimer();
       },
     );
@@ -2585,9 +2423,28 @@ function startIpcWatcher(): void {
                       targetGroup,
                     )
                   ) {
-                    await sendMessage(data.chatJid, data.text);
+                    // 模型指定了 IM 渠道 — 发送到 IM
+                    if (data.targetChannel) {
+                      const localImagePaths = extractLocalImImagePaths(
+                        data.text,
+                        sourceGroup,
+                      );
+                      sendImWithFailTracking(
+                        data.targetChannel,
+                        data.text,
+                        localImagePaths,
+                      );
+                    }
+                    // 始终存 DB + 广播 Web（不发 IM）
+                    await sendMessage(data.chatJid, data.text, {
+                      sendToIM: false,
+                    });
                     logger.info(
-                      { chatJid: data.chatJid, sourceGroup },
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        targetChannel: data.targetChannel,
+                      },
                       'IPC message sent',
                     );
                   } else {
@@ -2621,16 +2478,18 @@ function startIpcWatcher(): void {
                       const caption = data.caption || undefined;
                       const fileName = data.fileName || undefined;
 
-                      // Send to IM channel (caption is included in the image message itself)
-                      await imManager.sendImage(
-                        data.chatJid,
-                        imageBuffer,
-                        mimeType,
-                        caption,
-                        fileName,
-                      );
+                      // 只在有 targetChannel 时发送到 IM
+                      if (data.targetChannel) {
+                        await imManager.sendImage(
+                          data.targetChannel,
+                          imageBuffer,
+                          mimeType,
+                          caption,
+                          fileName,
+                        );
+                      }
 
-                      // Persist image message to DB and broadcast to WebSocket (same as sendMessage flow)
+                      // 始终在 Web 记录图片消息（文本占位符）
                       const displayText = caption
                         ? `[图片: ${fileName || 'image'}]\n${caption}`
                         : `[图片: ${fileName || 'image'}]`;
@@ -2661,6 +2520,7 @@ function startIpcWatcher(): void {
                         {
                           chatJid: data.chatJid,
                           sourceGroup,
+                          targetChannel: data.targetChannel,
                           mimeType,
                           size: imageBuffer.length,
                         },
@@ -2833,6 +2693,8 @@ async function processTaskIpc(
     // For send_file
     filePath?: string;
     fileName?: string;
+    // For targetChannel routing (send_file via model-controlled channel)
+    targetChannel?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Whether source is admin home container
@@ -3233,9 +3095,21 @@ async function processTaskIpc(
             break;
           }
 
-          await imManager.sendFile(data.chatJid, resolvedPath, data.fileName);
+          // 只在有 targetChannel 时发送到 IM（文件只能发 IM）
+          if (data.targetChannel) {
+            await imManager.sendFile(
+              data.targetChannel,
+              resolvedPath,
+              data.fileName,
+            );
+          }
           logger.info(
-            { sourceGroup, chatJid: data.chatJid, fileName: data.fileName },
+            {
+              sourceGroup,
+              chatJid: data.chatJid,
+              targetChannel: data.targetChannel,
+              fileName: data.fileName,
+            },
             'File sent via IPC',
           );
         } catch (err) {
@@ -3299,36 +3173,6 @@ async function processAgentConversation(
   const prompt = formatMessages(missedMessages, false);
   const images = collectMessageImages(virtualChatJid, missedMessages);
   const imagesForAgent = images.length > 0 ? images : undefined;
-  // For agent conversations, route reply to IM based on the most recent
-  // message's source.  Unlike the main conversation (#99), agent conversations
-  // are explicitly bound to IM groups, so the user expects replies to go back
-  // to the IM channel they last messaged from — even if older messages in
-  // the batch originated from the web (e.g. after a /clear).
-  let replySourceImJid: string | null = null;
-  {
-    const lastSourceJid = missedMessages[missedMessages.length - 1]?.source_jid;
-    if (lastSourceJid && getChannelType(lastSourceJid) !== null) {
-      replySourceImJid = lastSourceJid;
-    }
-  }
-
-  // ── Feishu Streaming Card (conversation agent) ──
-  // Unlike processGroupMessages which falls back to chatJid, conversation agents
-  // only stream when the message originates from an IM channel (replySourceImJid).
-  // Web-only interactions don't need a Feishu streaming card.
-  const streamingSessionJid = replySourceImJid;
-  const agentStreamingSession = streamingSessionJid
-    ? imManager.createStreamingSession(streamingSessionJid)
-    : undefined;
-  let agentStreamingAccText = '';
-  if (agentStreamingSession && streamingSessionJid) {
-    registerStreamingSession(streamingSessionJid, agentStreamingSession);
-    logger.debug(
-      { chatJid, agentId },
-      'Streaming card session created for conversation agent',
-    );
-  }
-
   // Track idle timer
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   const resetIdleTimer = () => {
@@ -3370,16 +3214,6 @@ async function processAgentConversation(
     if (output.status === 'stream' && output.streamEvent) {
       broadcastStreamEvent(chatJid, output.streamEvent, agentId);
 
-      // ── Feed text_delta into Feishu streaming card ──
-      if (
-        agentStreamingSession &&
-        output.streamEvent.eventType === 'text_delta' &&
-        output.streamEvent.text
-      ) {
-        agentStreamingAccText += output.streamEvent.text;
-        agentStreamingSession.append(agentStreamingAccText);
-      }
-
       // Persist token usage for agent conversations
       if (
         output.streamEvent.eventType === 'usage' &&
@@ -3413,13 +3247,13 @@ async function processAgentConversation(
       return;
     }
 
-    // Agent reply
+    // Agent reply — Web 存储 + 广播，不发 IM（模型通过 send_message 工具主动发 IM）
     if (output.result) {
       const raw =
         typeof output.result === 'string'
           ? output.result
           : JSON.stringify(output.result);
-      const text = stripAgentInternalTags(raw);
+      const text = raw.trim();
       if (text) {
         const msgId = crypto.randomUUID();
         lastAgentReplyMsgId = msgId;
@@ -3447,38 +3281,6 @@ async function processAgentConversation(
           },
           agentId,
         );
-
-        const localImagePaths = extractLocalImImagePaths(
-          text,
-          effectiveGroup.folder,
-        );
-
-        // ── Complete Feishu streaming card or fall back to static message ──
-        let streamingCardHandledIM = false;
-        if (agentStreamingSession?.isActive()) {
-          try {
-            await agentStreamingSession.complete(text);
-            streamingCardHandledIM = true;
-          } catch (err) {
-            logger.warn(
-              { err, chatJid, agentId },
-              'Agent streaming card complete failed, falling back to static message',
-            );
-          }
-        }
-
-        if (replySourceImJid && !streamingCardHandledIM) {
-          sendImWithFailTracking(replySourceImJid, text, localImagePaths);
-        }
-
-        // Optional mirror mode for linked IM channels
-        for (const [imJid, g] of Object.entries(registeredGroups)) {
-          if (g.target_agent_id !== agentId || imJid === replySourceImJid)
-            continue;
-          if (g.reply_policy !== 'mirror') continue;
-          if (getChannelType(imJid))
-            sendImWithFailTracking(imJid, text, localImagePaths);
-        }
 
         commitCursor();
         resetIdleTimer();
@@ -3606,20 +3408,6 @@ async function processAgentConversation(
     logger.error({ agentId, chatJid, err }, 'Agent conversation error');
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
-
-    // ── Streaming card cleanup ──
-    if (agentStreamingSession) {
-      if (agentStreamingSession.isActive()) {
-        if (hadError) {
-          await agentStreamingSession.abort('处理出错').catch(() => {});
-        } else {
-          agentStreamingSession.dispose();
-        }
-      }
-      if (streamingSessionJid) {
-        unregisterStreamingSession(streamingSessionJid);
-      }
-    }
   }
 
   // Process ended → set status back to idle (conversation agents persist)
@@ -3731,11 +3519,6 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
 
-          // Home and non-home groups now share the same IPC injection path.
-          // Reply routing is dynamically updated via activeRouteUpdaters when
-          // the message is successfully injected, so we no longer need to kill
-          // the process for home groups.
-
           const shared = !group.is_home && isGroupShared(group.folder);
           const formatted = formatMessages(messagesToSend, shared);
 
@@ -3745,19 +3528,11 @@ async function startMessageLoop(): Promise<void> {
           const lastRawText = messagesToSend[messagesToSend.length - 1].content;
           const intent = analyzeIntent(lastRawText);
 
-          // Determine the IM source JID for route update on successful injection
-          const lastSourceJidForRoute =
-            messagesToSend[messagesToSend.length - 1]?.source_jid || chatJid;
-
           const sendResult = queue.sendMessage(
             chatJid,
             formatted,
             imagesForAgent,
             intent,
-            () => {
-              // IPC write succeeded — update reply route for the running agent
-              activeRouteUpdaters.get(group.folder)?.(lastSourceJidForRoute);
-            },
           );
           if (sendResult === 'sent') {
             logger.debug(
@@ -4808,9 +4583,6 @@ async function main(): Promise<void> {
       imManager.getFeishuChatInfo(userId, chatId),
     clearImFailCounts: (jid: string) => {
       imHealthCheckFailCounts.delete(jid);
-    },
-    updateReplyRoute: (folder: string, sourceJid: string | null) => {
-      activeRouteUpdaters.get(folder)?.(sourceJid);
     },
   });
 

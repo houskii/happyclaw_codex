@@ -346,7 +346,6 @@ async function handleWebUserMessage(
     () => {
       // IPC write succeeded — update reply route for home groups.
       // Web messages have no IM source, so clear the IM route.
-      deps!.updateReplyRoute?.(group.folder, null);
     },
   );
   if (sendResult === 'sent') {
