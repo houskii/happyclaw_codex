@@ -1843,10 +1843,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  // Runner 状态同步：idle 时清理残留的 streaming/waiting 状态
+  // Runner 状态同步：idle 时清理残留状态，running 时重新启用 stream event 接收
   handleRunnerState: (chatJid, state) => {
     if (state === 'idle') {
       get().clearStreaming(chatJid);
+    } else if (state === 'running') {
+      // 新进程启动时重新设置 waiting=true，确保 handleStreamEvent 的防重入
+      // guard（!streaming && waiting===false）不会丢弃新进程的 stream events。
+      // 典型场景：上一进程的 idle 清除了 waiting，drainGroup 立即启动新进程。
+      set((s) => ({
+        waiting: { ...s.waiting, [chatJid]: true },
+      }));
     }
   },
 
