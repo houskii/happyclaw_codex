@@ -326,6 +326,12 @@ async function consumeQuery(q: Query): Promise<void> {
         }
       }
     }
+    // for-await 正常结束但还有 pending（SDK 没发 result 就退出了），reject 掉
+    if (pendingResolve) {
+      log('Warning: query session ended with pending resolve, rejecting');
+      pendingResolve({ text: 'Query session ended without result', isError: true });
+      pendingResolve = null;
+    }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     log(`Query consumer error: ${errMsg}`);
@@ -356,6 +362,7 @@ function startSession(): Session {
         'Edit',
         'Grep',
         'Glob',
+        'Bash',
       ],
     },
   });
@@ -422,6 +429,12 @@ async function main(): Promise<void> {
 
     // Push prompt and wait for result
     const prompt = buildPrompt(request);
+    // 防御性清理：如果有残留的旧 pendingResolve，先 reject 掉
+    if (pendingResolve) {
+      log('Warning: stale pendingResolve found before new request, rejecting');
+      pendingResolve({ text: 'Superseded by new request', isError: true });
+      pendingResolve = null;
+    }
     const resultPromise = waitForResult();
     session.stream.push(prompt);
     session.requestCount++;

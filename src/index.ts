@@ -141,14 +141,13 @@ import {
 } from './web.js';
 import { installSkillForUser, deleteSkillForUser } from './routes/skills.js';
 import { verifyPairingCode } from './telegram-pairing.js';
-import { executeSessionReset } from './commands.js';
 import {
   MemoryAgentManager,
   exportTranscriptsForUser,
 } from './memory-agent.js';
 import { injectMemoryAgentDeps } from './routes/memory-agent.js';
 import { injectMemoryDeps } from './routes/memory.js';
-import { getUserMemoryMode } from './runtime-config.js';
+
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
@@ -556,7 +555,7 @@ async function handleCommand(
 
   switch (cmd) {
     case 'clear':
-      return handleClearCommand(chatJid);
+      return '此命令仅支持在 Web 端使用';
     case 'list':
     case 'ls':
       return handleListCommand(chatJid);
@@ -577,40 +576,6 @@ async function handleCommand(
       return handleRequireMentionCommand(chatJid, rawArgs);
     default:
       return null;
-  }
-}
-
-async function handleClearCommand(chatJid: string): Promise<string> {
-  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
-  if (!group) return '未找到当前工作区';
-
-  // Only agent-bound IM groups support /clear (clears that agent's context).
-  // Main-conversation-bound groups (target_main_jid) should be cleared from Web.
-  if (group.target_main_jid && !group.target_agent_id) {
-    return '当前群组未绑定子对话，请在 Web 端清除上下文';
-  }
-
-  const agentId = group.target_agent_id || undefined;
-
-  try {
-    await executeSessionReset(
-      chatJid,
-      group.folder,
-      {
-        queue,
-        sessions,
-        broadcast: broadcastNewMessage,
-        setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => {
-          lastAgentTimestamp[jid] = cursor;
-          saveState();
-        },
-      },
-      agentId,
-    );
-    return '已清除对话上下文 ✓';
-  } catch (err) {
-    logger.error({ chatJid, agentId, err }, 'handleCommand /clear failed');
-    return '清除上下文失败，请稍后重试';
   }
 }
 
@@ -1287,8 +1252,6 @@ function loadState(): void {
     }
   }
 
-  // Migrate shared global CLAUDE.md → per-user user-global directories
-  migrateGlobalMemoryToPerUser();
 
   // Initialize per-user global CLAUDE.md from template for users missing it
   const templatePath = path.resolve(
@@ -2668,12 +2631,16 @@ function startIpcWatcher(): void {
   logger.info('IPC watcher started (per-group namespaces)');
 }
 
+// Module-level reference set after MemoryAgentManager creation, used by processTaskIpc.
+let memoryAgentManagerRef: MemoryAgentManager | null = null;
+
 async function processTaskIpc(
   data: {
     type: string;
     taskId?: string;
     prompt?: string;
     schedule_type?: string;
+    userId?: string;
     schedule_value?: string;
     context_mode?: string;
     execution_type?: string;
@@ -3120,6 +3087,23 @@ async function processTaskIpc(
           { data },
           'Invalid send_file request - missing required fields',
         );
+      }
+      break;
+
+    case 'session_wrapup':
+      if (data.userId && data.groupFolder && isHome && memoryAgentManagerRef) {
+        const allJids = getJidsByFolder(data.groupFolder);
+        exportTranscriptsForUser(
+          data.userId,
+          data.groupFolder,
+          allJids,
+          memoryAgentManagerRef,
+        ).catch((err) => {
+          logger.warn(
+            { groupFolder: data.groupFolder, err },
+            'session_wrapup via PreCompact IPC failed',
+          );
+        });
       }
       break;
 
@@ -4120,90 +4104,6 @@ function migrateDataDirectories(): void {
   }
 }
 
-/**
- * One-shot migration: copy shared global CLAUDE.md → first admin's user-global dir.
- * Creates user-global directories for all existing users.
- * Idempotent via flag file.
- */
-function migrateGlobalMemoryToPerUser(): void {
-  const flagFile = path.join(DATA_DIR, 'config', '.memory-migration-v1-done');
-  if (fs.existsSync(flagFile)) return;
-
-  const oldGlobalMd = path.join(GROUPS_DIR, 'global', 'CLAUDE.md');
-  const userGlobalBase = path.join(GROUPS_DIR, 'user-global');
-
-  let migrationSucceeded = true;
-  let copiedLegacyGlobal = !fs.existsSync(oldGlobalMd);
-
-  // Find first admin user
-  try {
-    const result = listUsers({
-      role: 'admin',
-      status: 'active',
-      page: 1,
-      pageSize: 1,
-    });
-    const firstAdmin = result.users[0];
-
-    if (firstAdmin && fs.existsSync(oldGlobalMd)) {
-      const adminDir = path.join(userGlobalBase, firstAdmin.id);
-      fs.mkdirSync(adminDir, { recursive: true });
-      const target = path.join(adminDir, 'CLAUDE.md');
-      if (!fs.existsSync(target)) {
-        fs.copyFileSync(oldGlobalMd, target);
-        logger.info(
-          { userId: firstAdmin.id, src: oldGlobalMd, dst: target },
-          'Migrated global CLAUDE.md to admin user-global',
-        );
-      }
-      copiedLegacyGlobal = true;
-    } else if (!firstAdmin && fs.existsSync(oldGlobalMd)) {
-      migrationSucceeded = false;
-      logger.warn(
-        'No active admin found for legacy global memory migration; will retry on next startup',
-      );
-    }
-
-    // Create user-global dirs for all users
-    let page = 1;
-    const allUsers: Array<{ id: string }> = [];
-    while (true) {
-      const r = listUsers({ status: 'active', page, pageSize: 200 });
-      allUsers.push(...r.users);
-      if (allUsers.length >= r.total) break;
-      page++;
-    }
-    for (const u of allUsers) {
-      fs.mkdirSync(path.join(userGlobalBase, u.id), { recursive: true });
-    }
-  } catch (err) {
-    migrationSucceeded = false;
-    logger.warn({ err }, 'Global memory migration encountered an error');
-  }
-
-  if (!migrationSucceeded) {
-    logger.warn(
-      'Global memory migration incomplete; will retry on next startup',
-    );
-    return;
-  }
-
-  if (!copiedLegacyGlobal) {
-    logger.warn(
-      'Legacy global memory has not been copied; will retry on next startup',
-    );
-    return;
-  }
-
-  try {
-    fs.mkdirSync(path.dirname(flagFile), { recursive: true });
-    fs.writeFileSync(flagFile, new Date().toISOString());
-    logger.info('Global memory migration to per-user completed');
-  } catch (err) {
-    logger.warn({ err }, 'Failed to persist global memory migration flag');
-  }
-}
-
 async function main(): Promise<void> {
   migrateDataDirectories();
   initDatabase();
@@ -4241,19 +4141,17 @@ async function main(): Promise<void> {
 
   // --- Memory Agent Manager ---
   const memoryAgentManager = new MemoryAgentManager();
+  memoryAgentManagerRef = memoryAgentManager;
   const memoryAgentToken = crypto.randomBytes(32).toString('hex');
   injectMemoryAgentDeps({ manager: memoryAgentManager, token: memoryAgentToken });
   injectMemoryDeps({ manager: memoryAgentManager, queue });
   memoryAgentManager.startIdleChecks();
   logger.info('Memory Agent Manager initialized');
 
-  // --- Memory Agent: transcript export on container exit (Phase 2-B/2-C) ---
+  // --- Memory Agent: transcript export on container exit ---
   queue.addOnContainerExitListener((groupJid: string) => {
     const group = registeredGroups[groupJid] ?? getRegisteredGroup(groupJid);
     if (!group?.is_home || !group.created_by) return;
-
-    const memoryMode = getUserMemoryMode(group.created_by);
-    if (memoryMode !== 'agent') return;
 
     const allJids = getJidsByFolder(group.folder);
     exportTranscriptsForUser(
@@ -4261,7 +4159,9 @@ async function main(): Promise<void> {
       group.folder,
       allJids,
       memoryAgentManager,
-    );
+    ).catch((err) => {
+      logger.warn({ groupJid, err }, 'Memory Agent session_wrapup failed (non-blocking)');
+    });
   });
 
   // --- Channel reload helpers (hot-reload on config save) ---
@@ -4583,6 +4483,20 @@ async function main(): Promise<void> {
       imManager.getFeishuChatInfo(userId, chatId),
     clearImFailCounts: (jid: string) => {
       imHealthCheckFailCounts.delete(jid);
+    },
+    triggerSessionWrapup: async (folder: string) => {
+      // Find the home group for this folder to get userId
+      const homeGroup = Object.values(registeredGroups).find(
+        (g) => g.folder === folder && g.is_home && g.created_by,
+      );
+      if (!homeGroup?.created_by || !memoryAgentManager) return;
+      const allJids = getJidsByFolder(folder);
+      await exportTranscriptsForUser(
+        homeGroup.created_by,
+        folder,
+        allJids,
+        memoryAgentManager,
+      );
     },
   });
 

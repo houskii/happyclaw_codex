@@ -31,7 +31,7 @@ export type { StreamEventType, StreamEvent } from './types.js';
 import { sanitizeFilename, generateFallbackName } from './utils.js';
 import { StreamEventProcessor } from './stream-processor.js';
 import { PREDEFINED_AGENTS } from './agent-definitions.js';
-import { createMcpTools } from './mcp-tools.js';
+import { createMcpTools, writeIpcFile } from './mcp-tools.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
@@ -47,7 +47,6 @@ const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
-let needsMemoryFlush = false;
 let currentPermissionMode: PermissionMode = 'bypassPermissions';
 
 const DEFAULT_ALLOWED_TOOLS = [
@@ -59,31 +58,6 @@ const DEFAULT_ALLOWED_TOOLS = [
   'TodoWrite', 'ToolSearch', 'Skill',
   'NotebookEdit',
   'mcp__happyclaw__*'
-];
-
-const MEMORY_FLUSH_ALLOWED_TOOLS = [
-  'mcp__happyclaw__memory_search',
-  'mcp__happyclaw__memory_get',
-  'mcp__happyclaw__memory_append',
-  'Read',  // 读取全局 CLAUDE.md 当前内容
-  'Edit',  // 编辑全局 CLAUDE.md（永久记忆）
-];
-
-// Memory flush 期间禁用的工具（disallowedTools 会从模型上下文中完全移除这些工具）
-// 注意：allowedTools 仅控制自动审批，不限制工具可见性；
-//       bypassPermissions 模式下所有工具都自动通过，所以必须用 disallowedTools 来限制
-const MEMORY_FLUSH_DISALLOWED_TOOLS = [
-  'Bash', 'Write', 'WebSearch', 'WebFetch', 'Glob', 'Grep',
-  'Task', 'TaskOutput', 'TaskStop',
-  'TeamCreate', 'TeamDelete', 'SendMessage',
-  'TodoWrite', 'ToolSearch', 'Skill', 'NotebookEdit',
-  'mcp__happyclaw__send_message',
-  'mcp__happyclaw__schedule_task',
-  'mcp__happyclaw__list_tasks',
-  'mcp__happyclaw__pause_task',
-  'mcp__happyclaw__resume_task',
-  'mcp__happyclaw__cancel_task',
-  'mcp__happyclaw__register_group',
 ];
 
 const IMAGE_MAX_DIMENSION = 8000; // Anthropic API 限制
@@ -350,7 +324,12 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
 /**
  * Archive the full transcript to conversations/ before compaction.
  */
-function createPreCompactHook(isHome: boolean, _isAdminHome: boolean): HookCallback {
+function createPreCompactHook(
+  isHome: boolean,
+  _isAdminHome: boolean,
+  groupFolder: string,
+  userId?: string,
+): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preCompact = input as PreCompactHookInput;
     const transcriptPath = preCompact.transcript_path;
@@ -384,14 +363,20 @@ function createPreCompactHook(isHome: boolean, _isAdminHome: boolean): HookCallb
       fs.writeFileSync(filePath, markdown);
 
       log(`Archived conversation to ${filePath}`);
+
+      // Signal main process to trigger session_wrapup for memory system
+      if (isHome && userId) {
+        const tasksDir = path.join(WORKSPACE_IPC, 'tasks');
+        writeIpcFile(tasksDir, {
+          type: 'session_wrapup',
+          groupFolder,
+          userId,
+          timestamp: new Date().toISOString(),
+        });
+        log(`Sent session_wrapup IPC signal for ${groupFolder}`);
+      }
     } catch (err) {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // Flag memory flush for home containers (full memory write access)
-    if (isHome) {
-      needsMemoryFlush = true;
-      log('PreCompact: flagged memory flush for home container');
     }
 
     return {};
@@ -575,7 +560,6 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
 
 // Memory Agent mode: read index.md from the memory-index mount
 const WORKSPACE_MEMORY_INDEX = process.env.HAPPYCLAW_WORKSPACE_MEMORY_INDEX || '/workspace/memory-index';
-const MEMORY_MODE = process.env.HAPPYCLAW_MEMORY_MODE || 'legacy';
 
 function readMemoryIndex(): string {
   const indexPath = path.join(WORKSPACE_MEMORY_INDEX, 'index.md');
@@ -597,9 +581,8 @@ function readPersonality(): string {
   return '';
 }
 
-function buildMemoryRecallPrompt(isHome: boolean, isAdminHome: boolean): string {
-  // New Memory Agent mode: inject index.md + agent-based memory tools
-  if (MEMORY_MODE === 'agent' && isHome) {
+function buildMemoryRecallPrompt(isHome: boolean, _isAdminHome: boolean): string {
+  if (isHome) {
     const indexContent = readMemoryIndex();
     const parts = [
       '',
@@ -631,94 +614,32 @@ function buildMemoryRecallPrompt(isHome: boolean, isAdminHome: boolean): string 
     }
 
     parts.push(
-      '- 需要回忆过去的对话、查找用户信息、确认某件事 → `memory_query`',
-      '- 用户说「记住」或发现重要信息 → `memory_remember`',
-      '- 不要自己修改记忆文件，记忆由专门的系统管理',
+      '你有长期记忆能力。每次对话结束后，系统会自动整理对话内容，提取关键信息存入记忆，所以你不需要频繁手动记录。',
       '',
-      'memory_query 可能需要几秒钟。查询时可以先告诉用户「让我想想……」。',
+      '只在以下情况使用 `memory_remember`：',
+      '- 用户明确说「记住」「别忘了」',
+      '- 特别重要、怕被自动整理遗漏的信息（如用户纠正了个人信息、重要决策）',
+      '',
+      '需要回忆过去的对话或查找信息 → `memory_query`',
+      '查询可能需要几秒钟，可以先说「让我想想……」。',
+      '',
+      '不要在 CLAUDE.md 里手动维护用户信息——用户身份、偏好、知识由记忆系统统一管理，已通过上方随身索引加载。',
     );
     return parts.join('\n');
   }
 
-  if (isHome) {
-    // Legacy mode: Home container (admin or member): full memory system with read/write access to user's global CLAUDE.md
-    return [
-      '',
-      '## 记忆系统',
-      '',
-      '你拥有跨会话的持久记忆能力，请积极使用。',
-      '',
-      '### 回忆',
-      '在回答关于过去的工作、决策、日期、偏好或待办事项之前：',
-      '先用 `memory_search` 搜索，再用 `memory_get` 获取完整上下文。',
-      '',
-      '### 存储——两层记忆架构',
-      '',
-      '获知重要信息后**必须立即保存**，不要等到上下文压缩。',
-      '根据信息的**时效性**选择存储位置：',
-      '',
-      '#### 全局记忆（永久）→ 直接编辑 `/workspace/global/CLAUDE.md`',
-      '',
-      '**优先使用全局记忆。** 适用于所有**跨会话仍然有用**的信息：',
-      '- 用户身份：姓名、生日、联系方式、地址、工作单位',
-      '- 长期偏好：沟通风格、称呼方式、喜好厌恶、技术栈偏好',
-      '- 身份配置：你的名字、角色设定、行为准则',
-      '- 常用项目与上下文：反复提到的仓库、服务、架构信息',
-      '- 用户明确要求「记住」的任何内容',
-      '',
-      '使用 `Read` 工具读取当前内容，再用 `Edit` 工具**原地更新对应字段**。',
-      '文件中标记「待记录」的字段发现信息后**必须立即填写**。',
-      '不要追加重复信息，保持文件简洁有序。',
-      '',
-      '#### 日期记忆（时效性）→ 调用 `memory_append`',
-      '',
-      '适用于**过一段时间会过时**的信息：',
-      '- 项目进展：今天做了什么、决定了什么、遇到了什么问题',
-      '- 临时技术决策：选型理由、架构方案、变更记录',
-      '- 待办与承诺：约定事项、截止日期、后续跟进',
-      '- 会议/讨论要点：关键结论、行动项',
-      '',
-      '`memory_append` 自动保存到独立的记忆目录（不在工作区内）。',
-      '',
-      '#### 判断标准',
-      '> **默认优先全局记忆。** 问自己：这条信息下次对话还可能用到吗？',
-      '> - 是 / 可能 → **全局记忆**（编辑 `/workspace/global/CLAUDE.md`）',
-      '> - 明确只跟今天有关 → 日期记忆（`memory_append`）',
-      '> - 用户说「记住这个」→ **一定写全局记忆**',
-      '',
-      '系统也会在上下文压缩前提示你保存记忆。',
-    ].join('\n');
-  }
-  // Non-home group container with Memory Agent mode: read-only query via memory_query
-  if (MEMORY_MODE === 'agent') {
-    return [
-      '',
-      '## 记忆',
-      '',
-      '### 查询记忆',
-      '可使用 `memory_query` 工具查询用户的记忆（过去的对话、偏好、项目知识等）。',
-      '查询可能需要几秒钟。',
-      '',
-      '### 本地记忆',
-      '重要信息直接记录在当前工作区的 CLAUDE.md 或其他文件中。',
-      'Claude 会自动维护你的会话记忆，无需额外操作。',
-    ].join('\n');
-  }
-
-  // Non-home group container (legacy mode): read-only access to home memory
+  // Non-home group container: read-only query via memory_query
   return [
     '',
     '## 记忆',
     '',
-    '### 查询主工作区记忆',
-    '可使用 `memory_search` 和 `memory_get` 工具搜索主工作区的记忆（全局记忆和日期记忆）。',
-    '需要回忆过去的决策、偏好或项目上下文时使用这些工具。',
+    '### 查询记忆',
+    '可使用 `memory_query` 工具查询用户的记忆（过去的对话、偏好、项目知识等）。',
+    '查询可能需要几秒钟。',
     '',
     '### 本地记忆',
     '重要信息直接记录在当前工作区的 CLAUDE.md 或其他文件中。',
     'Claude 会自动维护你的会话记忆，无需额外操作。',
-    '',
-    '全局记忆（`/workspace/global/CLAUDE.md`）为只读参考。',
   ].join('\n');
 }
 
@@ -963,7 +884,7 @@ async function runQuery(
         happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome)] }]
+        PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }]
       },
       agents: PREDEFINED_AGENTS,
     }
@@ -1327,43 +1248,6 @@ async function main(): Promise<void> {
         prompt = nextMessage.text;
         promptImages = nextMessage.images;
         continue;
-      }
-
-      // Memory Flush: run an extra query to let agent save durable memories (home containers only)
-      if (needsMemoryFlush && isHome) {
-        needsMemoryFlush = false;
-        log('Running memory flush query after compaction...');
-
-        const today = new Date().toISOString().split('T')[0];
-        const flushPrompt = [
-          '上下文压缩前记忆刷新。',
-          '**优先检查全局记忆**：先 Read /workspace/global/CLAUDE.md，如果有「待记录」字段且你已获知对应信息（用户身份、偏好、常用项目等），用 Edit 工具立即填写。',
-          '用户明确要求记住的内容，以及下次对话仍可能用到的信息，也写入全局记忆。',
-          `然后使用 memory_append 将时效性记忆保存到 memory/${today}.md（今日进展、临时决策、待办等）。`,
-          '如需确认上下文，可先用 memory_search/memory_get 查阅。',
-          '如果没有值得保存的内容，回复一个字：OK。',
-        ].join(' ');
-
-        const flushResult = await runQuery(
-          flushPrompt,
-          sessionId,
-          mcpServerConfig,
-          containerInput,
-          memoryRecallPrompt,
-          resumeAt,
-          false,
-          MEMORY_FLUSH_ALLOWED_TOOLS,
-          MEMORY_FLUSH_DISALLOWED_TOOLS,
-        );
-        if (flushResult.newSessionId) sessionId = flushResult.newSessionId;
-        if (flushResult.lastAssistantUuid) resumeAt = flushResult.lastAssistantUuid;
-        log('Memory flush completed');
-
-        if (flushResult.closedDuringQuery) {
-          log('Close sentinel during memory flush, exiting');
-          writeOutput({ status: 'closed', result: null });
-          break;
-        }
       }
 
       // Emit session update so host can track it

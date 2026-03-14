@@ -25,7 +25,7 @@ import {
   FeishuConfigSchema,
   TelegramConfigSchema,
   QQConfigSchema,
-  MemoryModeSchema,
+
   RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
@@ -65,8 +65,7 @@ import {
   saveUserTelegramConfig,
   getUserQQConfig,
   saveUserQQConfig,
-  getUserMemoryMode,
-  saveUserMemoryMode,
+
   updateAllSessionCredentials,
   detectLocalClaudeCode,
   importLocalClaudeCredentials,
@@ -76,7 +75,6 @@ import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import { logger } from '../logger.js';
 import { checkImChannelLimit, isBillingEnabled, clearBillingEnabledCache } from '../billing.js';
-import { importLegacyMemoryData } from '../memory-agent.js';
 
 const configRoutes = new Hono<{ Variables: Variables }>();
 
@@ -2025,60 +2023,6 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   }
 
   return c.json({ error: 'Must provide target_main_jid, target_agent_id, or unbind' }, 400);
-});
-
-// ─── Per-user memory mode ──────────────────────────────────────────
-
-configRoutes.get('/user-im/memory', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  try {
-    const mode = getUserMemoryMode(user.id);
-    return c.json({ memoryMode: mode });
-  } catch (err) {
-    logger.warn({ err, userId: user.id }, 'Failed to read memory mode');
-    return c.json({ memoryMode: 'legacy' });
-  }
-});
-
-configRoutes.put('/user-im/memory', authMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
-  const body = await c.req.json().catch(() => ({}));
-  const validation = MemoryModeSchema.safeParse(body);
-  if (!validation.success) {
-    return c.json(
-      { error: 'Invalid request', details: validation.error.issues },
-      400,
-    );
-  }
-  try {
-    saveUserMemoryMode(user.id, validation.data.memoryMode);
-    return c.json({ memoryMode: validation.data.memoryMode });
-  } catch (err) {
-    logger.warn({ err, userId: user.id }, 'Failed to save memory mode');
-    return c.json({ error: 'Failed to save memory mode' }, 500);
-  }
-});
-
-// POST /api/config/user-im/memory/import-legacy
-// Import old memory system data (CLAUDE.md + daily-summary) into agent memory structure
-configRoutes.post('/user-im/memory/import-legacy', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  try {
-    const result = importLegacyMemoryData(user.id);
-    logger.info(
-      {
-        userId: user.id,
-        imported: result.imported.length,
-        skipped: result.skipped.length,
-        errors: result.errors.length,
-      },
-      'Legacy memory import completed',
-    );
-    return c.json(result);
-  } catch (err) {
-    logger.error({ err, userId: user.id }, 'Legacy memory import failed');
-    return c.json({ error: 'Import failed' }, 500);
-  }
 });
 
 // ─── Local Claude Code detection ──────────────────────────────────

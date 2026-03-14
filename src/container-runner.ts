@@ -23,7 +23,7 @@ import {
   getClaudeProviderConfig,
   getContainerEnvConfig,
   getSystemSettings,
-  getUserMemoryMode,
+
   mergeClaudeEnvConfig,
   shellQuoteEnvLines,
   writeCredentialsFile,
@@ -323,29 +323,25 @@ function buildVolumeMounts(
   const containerOverride = getContainerEnvConfig(group.folder);
   const envLines = buildContainerEnvLines(globalConfig, containerOverride);
 
-  // Memory Agent mode env vars (for Docker containers)
+  // Memory Agent env vars (for Docker containers)
   if (ownerId) {
-    const memoryMode = getUserMemoryMode(ownerId);
-    envLines.push(`HAPPYCLAW_MEMORY_MODE=${memoryMode}`);
-    if (memoryMode === 'agent') {
-      const token = getInternalToken();
-      if (token) envLines.push(`HAPPYCLAW_INTERNAL_TOKEN=${token}`);
-      // Docker containers use host.docker.internal to reach the host
-      envLines.push(`HAPPYCLAW_API_URL=http://host.docker.internal:${process.env.WEB_PORT || '3000'}`);
+    const token = getInternalToken();
+    if (token) envLines.push(`HAPPYCLAW_INTERNAL_TOKEN=${token}`);
+    // Docker containers use host.docker.internal to reach the host
+    envLines.push(`HAPPYCLAW_API_URL=http://host.docker.internal:${process.env.WEB_PORT || '3000'}`);
 
-      // Pass memory query timeout so agent-runner HTTP timeout stays in sync
-      const settings = getSystemSettings();
-      envLines.push(`HAPPYCLAW_MEMORY_QUERY_TIMEOUT=${settings.memoryQueryTimeout}`);
+    // Pass memory query timeout so agent-runner HTTP timeout stays in sync
+    const settings = getSystemSettings();
+    envLines.push(`HAPPYCLAW_MEMORY_QUERY_TIMEOUT=${settings.memoryQueryTimeout}`);
 
-      // Mount memory directory as read-only for index.md injection
-      const memoryIndexDir = path.join(DATA_DIR, 'memory', ownerId);
-      mkdirForContainer(memoryIndexDir);
-      mounts.push({
-        hostPath: memoryIndexDir,
-        containerPath: '/workspace/memory-index',
-        readonly: true,
-      });
-    }
+    // Mount memory directory as read-only for index.md injection
+    const memoryIndexDir = path.join(DATA_DIR, 'memory', ownerId);
+    mkdirForContainer(memoryIndexDir);
+    mounts.push({
+      hostPath: memoryIndexDir,
+      containerPath: '/workspace/memory-index',
+      readonly: true,
+    });
   }
 
   if (envLines.length > 0) {
@@ -950,18 +946,14 @@ export async function runHostAgent(
   hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
   hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
 
-  // Memory Agent mode env vars
+  // Memory Agent env vars
   if (ownerId) {
-    const memoryMode = getUserMemoryMode(ownerId);
-    hostEnv['HAPPYCLAW_MEMORY_MODE'] = memoryMode;
-    if (memoryMode === 'agent') {
-      const token = getInternalToken();
-      if (token) hostEnv['HAPPYCLAW_INTERNAL_TOKEN'] = token;
-      hostEnv['HAPPYCLAW_API_URL'] = `http://localhost:${process.env.WEB_PORT || '3000'}`;
-      hostEnv['HAPPYCLAW_WORKSPACE_MEMORY_INDEX'] = path.join(DATA_DIR, 'memory', ownerId);
-      const settings = getSystemSettings();
-      hostEnv['HAPPYCLAW_MEMORY_QUERY_TIMEOUT'] = String(settings.memoryQueryTimeout);
-    }
+    const token = getInternalToken();
+    if (token) hostEnv['HAPPYCLAW_INTERNAL_TOKEN'] = token;
+    hostEnv['HAPPYCLAW_API_URL'] = `http://localhost:${process.env.WEB_PORT || '3000'}`;
+    hostEnv['HAPPYCLAW_WORKSPACE_MEMORY_INDEX'] = path.join(DATA_DIR, 'memory', ownerId);
+    const settings = getSystemSettings();
+    hostEnv['HAPPYCLAW_MEMORY_QUERY_TIMEOUT'] = String(settings.memoryQueryTimeout);
   }
 
   // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败

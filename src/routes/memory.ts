@@ -18,7 +18,7 @@ import { GROUPS_DIR, DATA_DIR } from '../config.js';
 import type { AuthUser } from '../types.js';
 import type { MemoryAgentManager } from '../memory-agent.js';
 import { readMemoryState, exportTranscriptsForUser } from '../memory-agent.js';
-import { getUserMemoryMode } from '../runtime-config.js';
+
 import type { GroupQueue } from '../group-queue.js';
 
 const memoryRoutes = new Hono<{ Variables: Variables }>();
@@ -668,18 +668,6 @@ export function injectMemoryDeps(deps: {
 
 memoryRoutes.get('/status', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
-  const mode = getUserMemoryMode(user.id);
-  if (mode !== 'agent') {
-    return c.json({
-      enabled: false,
-      lastGlobalSleep: null,
-      lastSessionWrapupAt: null,
-      pendingWrapupsCount: 0,
-      canTriggerWrapup: false,
-      canTriggerGlobalSleep: false,
-      hasActiveSession: false,
-    });
-  }
 
   const state = readMemoryState(user.id);
   const homeGroup = getUserHomeGroup(user.id);
@@ -713,9 +701,6 @@ memoryRoutes.get('/status', authMiddleware, (c) => {
 memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
 
-  if (getUserMemoryMode(user.id) !== 'agent') {
-    return c.json({ error: 'AI 记忆系统未启用' }, 400);
-  }
   if (!injectedManager) {
     return c.json({ error: '记忆系统未初始化' }, 503);
   }
@@ -731,8 +716,18 @@ memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
   activeWrapups.add(user.id);
   try {
     const allJids = getJidsByFolder(homeGroup.folder);
-    exportTranscriptsForUser(user.id, homeGroup.folder, allJids, injectedManager);
-    return c.json({ success: true, message: '已触发会话整理' });
+    const result = await exportTranscriptsForUser(user.id, homeGroup.folder, allJids, injectedManager);
+    if (result === null) {
+      return c.json({ success: true, message: '没有新消息需要整理' });
+    }
+    if (result.success) {
+      return c.json({ success: true, message: '会话整理完成' });
+    }
+    return c.json({ error: `会话整理失败: ${result.error || '未知错误'}` }, 500);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, userId: user.id }, 'Manual session_wrapup failed');
+    return c.json({ error: `会话整理失败: ${message}` }, 500);
   } finally {
     activeWrapups.delete(user.id);
   }
@@ -741,9 +736,6 @@ memoryRoutes.post('/trigger-wrapup', authMiddleware, async (c) => {
 memoryRoutes.post('/trigger-global-sleep', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
 
-  if (getUserMemoryMode(user.id) !== 'agent') {
-    return c.json({ error: 'AI 记忆系统未启用' }, 400);
-  }
   if (!injectedManager) {
     return c.json({ error: '记忆系统未初始化' }, 503);
   }

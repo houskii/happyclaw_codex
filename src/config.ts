@@ -3,7 +3,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'HappyClaw';
-export const POLL_INTERVAL = 2000;
+export const POLL_INTERVAL = 10000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts

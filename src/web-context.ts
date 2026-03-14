@@ -59,6 +59,7 @@ export interface WebDeps {
     chat_mode?: string;
   } | null>;
   clearImFailCounts?: (jid: string) => void;
+  triggerSessionWrapup?: (folder: string) => Promise<void>;
 }
 
 export type Variables = {

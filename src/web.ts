@@ -684,6 +684,10 @@ function setupWebSocket(server: any): WebSocketServer {
             const targetGroup = getRegisteredGroup(chatJid);
             if (targetGroup) {
               try {
+                // Export transcripts before reset (for memory system)
+                await deps.triggerSessionWrapup?.(targetGroup.folder).catch((err) => {
+                  logger.warn({ chatJid, err }, 'Pre-clear transcript export failed (non-blocking)');
+                });
                 await executeSessionReset(chatJid, targetGroup.folder, {
                   queue: deps.queue,
                   sessions: deps.getSessions(),

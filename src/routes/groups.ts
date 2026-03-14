@@ -1000,6 +1000,13 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
     }
   }
 
+  // 0. Export transcripts before reset (for memory system), main session only
+  if (!agentId && deps.triggerSessionWrapup) {
+    await deps.triggerSessionWrapup(group.folder).catch((err) => {
+      logger.warn({ jid, err }, 'Pre-reset transcript export failed (non-blocking)');
+    });
+  }
+
   // 1. Stop running processes
   try {
     if (agentId) {
