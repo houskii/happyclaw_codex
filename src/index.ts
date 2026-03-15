@@ -51,6 +51,7 @@ import {
   getRouterStateByPrefix,
   deleteRouterState,
   getTaskById,
+  getHomeGroupByFolder,
   getUserHomeGroup,
   initDatabase,
   isGroupShared,
@@ -6951,14 +6952,24 @@ async function main(): Promise<void> {
   // --- Memory Agent: transcript export on container exit (Phase 2-B/2-C) ---
   queue.addOnContainerExitListener((groupJid: string) => {
     const group = registeredGroups[groupJid] ?? getRegisteredGroup(groupJid);
-    if (!group?.is_home || !group.created_by) return;
+    if (!group?.folder) return;
+
+    // Resolve the home group owner — IM channels (telegram/feishu) share the
+    // folder but have is_home=0, so we look up the home group by folder.
+    let userId = group.created_by;
+    if (!group.is_home) {
+      const homeGroup = getHomeGroupByFolder(group.folder);
+      if (!homeGroup?.created_by) return;
+      userId = homeGroup.created_by;
+    }
+    if (!userId) return;
 
     const memoryMode = getUserMemoryMode(group.created_by);
     if (memoryMode !== 'agent') return;
 
     const allJids = getJidsByFolder(group.folder);
     exportTranscriptsForUser(
-      group.created_by,
+      userId,
       group.folder,
       allJids,
       memoryAgentManager,

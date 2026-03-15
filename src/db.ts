@@ -2423,6 +2423,22 @@ export function getGroupsByTargetMainJid(
 }
 
 /**
+ * Find the home group for a given folder (is_home=1).
+ * Used to resolve the owner of IM channels that share a folder with a home group.
+ */
+export function getHomeGroupByFolder(
+  folder: string,
+): (RegisteredGroup & { jid: string }) | undefined {
+  const row = db
+    .prepare(
+      'SELECT * FROM registered_groups WHERE folder = ? AND is_home = 1 LIMIT 1',
+    )
+    .get(folder) as RegisteredGroupRow | undefined;
+  if (!row) return undefined;
+  return parseGroupRow(row);
+}
+
+/**
  * Find a user's home group (is_home=1 + created_by=userId).
  * For admin users, also matches web:main even if created_by differs
  * (all admins share folder=main).
