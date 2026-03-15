@@ -695,6 +695,26 @@ async function runQuery(
   let ipcPolling = true;
   let closedDuringQuery = false;
   let interruptedDuringQuery = false;
+
+  // Query activity watchdog: if the SDK for-await loop yields no events for
+  // QUERY_ACTIVITY_TIMEOUT_MS, the API call is likely hung.  Force an interrupt
+  // so the session loop can retry with the same prompt.
+  const QUERY_ACTIVITY_TIMEOUT_MS = 60_000;
+  let lastEventAt = Date.now();
+  let queryActivityTimer: ReturnType<typeof setTimeout> | null = null;
+  const resetQueryActivityTimer = () => {
+    lastEventAt = Date.now();
+    if (queryActivityTimer) clearTimeout(queryActivityTimer);
+    queryActivityTimer = setTimeout(() => {
+      if (!ipcPolling) return; // query already ended
+      log(`Query activity timeout: no SDK events for ${QUERY_ACTIVITY_TIMEOUT_MS}ms, forcing interrupt`);
+      interruptedDuringQuery = true;
+      queryRef?.interrupt().catch((err: unknown) => log(`Activity timeout interrupt failed: ${err}`));
+      stream.end();
+      ipcPolling = false;
+    }, QUERY_ACTIVITY_TIMEOUT_MS);
+  };
+  resetQueryActivityTimer();
   // queryRef is set just before the for-await loop so pollIpcDuringQuery can call interrupt()
   let queryRef: { interrupt(): Promise<void>; setPermissionMode(mode: PermissionMode): Promise<void> } | null = null;
   const pollIpcDuringQuery = () => {
@@ -896,6 +916,8 @@ async function runQuery(
   });
     queryRef = q;
     for await (const message of q) {
+    // Reset activity watchdog on every SDK event
+    resetQueryActivityTimer();
     // 流式事件处理
     if (message.type === 'stream_event') {
       processor.processStreamEvent(message as any);
@@ -1042,10 +1064,12 @@ async function runQuery(
   processor.cleanup();
 
   ipcPolling = false;
+  if (queryActivityTimer) clearTimeout(queryActivityTimer);
   log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}`);
   return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery };
   } catch (err) {
     ipcPolling = false;
+    if (queryActivityTimer) clearTimeout(queryActivityTimer);
     const errorMessage = err instanceof Error ? err.message : String(err);
 
     // 检测上下文溢出错误

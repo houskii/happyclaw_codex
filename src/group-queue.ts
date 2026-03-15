@@ -677,6 +677,11 @@ export class GroupQueue {
     state.active = true;
     state.activeRunnerIsTask = false;
     state.pendingMessages = false;
+    // Pre-set groupFolder so resolveActiveState() works immediately,
+    // before registerProcess() is called after the agent process spawns.
+    // Without this, there is a window where active=true but groupFolder=null,
+    // causing sendMessage() to return 'no_active' and silently queue messages.
+    state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
     if (isHostMode) {
@@ -740,6 +745,7 @@ export class GroupQueue {
     const isHostMode = this.isHostMode(groupJid);
     state.active = true;
     state.activeRunnerIsTask = true;
+    state.groupFolder = this.getSerializationKey(groupJid);
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
     if (isHostMode) {
