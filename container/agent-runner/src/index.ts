@@ -814,30 +814,8 @@ async function runQuery(
     '且 agent-browser 可用，立即改用 agent-browser 通过真实浏览器访问。不要反复重试 WebFetch。',
   ].join('\n');
 
-  // Read HEARTBEAT.md (recent work summary) — only for home containers.
-  // Non-home containers are task-isolated and should not see unrelated work history,
-  // which can mislead the agent into "continuing" previous tasks instead of
-  // focusing on the user's current message.
-  let heartbeatContent = '';
-  if (isHome) {
-    const heartbeatPath = path.join(WORKSPACE_GLOBAL, 'HEARTBEAT.md');
-    if (fs.existsSync(heartbeatPath)) {
-      try {
-        const raw = fs.readFileSync(heartbeatPath, 'utf-8');
-        const truncated = raw.length > 4096 ? raw.slice(0, 4096) + '\n\n[...截断]' : raw;
-        heartbeatContent = [
-          '',
-          '## 近期工作参考（仅供背景了解）',
-          '',
-          '> 以下是系统自动生成的近期工作摘要，仅供参考。',
-          '> **不要主动继续这些工作**，除非用户明确要求「继续」或主动提到相关话题。',
-          '> 请专注于用户当前的消息。',
-          '',
-          truncated,
-        ].join('\n');
-      } catch { /* skip */ }
-    }
-  }
+  // HEARTBEAT.md injection disabled — replaced by Memory Agent's index.md
+  const heartbeatContent = '';
 
   const backgroundTaskGuidelines = [
     '',
