@@ -299,20 +299,47 @@ function buildVolumeMounts(
     fs.mkdirSync(userSkillsDir, { recursive: true });
   }
 
-  // 全量挂载：用户的所有 skills 在所有工作区中生效
-  if (fs.existsSync(projectSkillsDir)) {
-    mounts.push({
-      hostPath: projectSkillsDir,
-      containerPath: '/workspace/project-skills',
-      readonly: true,
-    });
-  }
-  if (userSkillsDir) {
-    mounts.push({
-      hostPath: userSkillsDir,
-      containerPath: '/workspace/user-skills',
-      readonly: true,
-    });
+  if (selectedSkills === null) {
+    // 全量挂载（默认行为）
+    if (fs.existsSync(projectSkillsDir)) {
+      mounts.push({
+        hostPath: projectSkillsDir,
+        containerPath: '/workspace/project-skills',
+        readonly: true,
+      });
+    }
+    if (userSkillsDir) {
+      mounts.push({
+        hostPath: userSkillsDir,
+        containerPath: '/workspace/user-skills',
+        readonly: false,
+      });
+    }
+  } else {
+    // 按需挂载：仅挂载选中的 skill 子目录（项目级），用户级整目录挂载（可写，允许创建新 skill）
+    const selectedSet = new Set(selectedSkills);
+    // 项目级 skills：按需挂载
+    if (fs.existsSync(projectSkillsDir)) {
+      for (const name of selectedSet) {
+        if (!/^[\w\-]+$/.test(name)) continue; // 防御性跳过非法名称
+        const skillPath = path.join(projectSkillsDir, name);
+        if (fs.existsSync(skillPath) && fs.statSync(skillPath).isDirectory()) {
+          mounts.push({
+            hostPath: skillPath,
+            containerPath: `/workspace/project-skills/${name}`,
+            readonly: true,
+          });
+        }
+      }
+    }
+    // 用户级 skills：整目录挂载（可写，agent 需要创建新 skill 目录）
+    if (userSkillsDir) {
+      mounts.push({
+        hostPath: userSkillsDir,
+        containerPath: '/workspace/user-skills',
+        readonly: false,
+      });
+    }
   }
 
   // Per-group IPC namespace: each group gets its own IPC directory
@@ -1197,6 +1224,9 @@ export async function runHostAgent(
       memoryFolder,
     );
     hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
+    if (ownerId) {
+      hostEnv['HAPPYCLAW_SKILLS_DIR'] = path.join(DATA_DIR, 'skills', ownerId);
+    }
     hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
     hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
     const homeClaudeDir = path.join(DATA_DIR, 'sessions', ownerHomeFolder || group.folder, '.claude');

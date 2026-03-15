@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { File, Folder, Loader2, Lock, Trash2, RefreshCw, Package } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
+import { File, Folder, Loader2, Lock, Trash2, Package } from 'lucide-react';
 import { useSkillsStore, type SkillDetail as SkillDetailType } from '../../stores/skills';
 import { MarkdownRenderer } from '../chat/MarkdownRenderer';
 
@@ -14,10 +15,8 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [reinstalling, setReinstalling] = useState(false);
   const getSkillDetail = useSkillsStore((state) => state.getSkillDetail);
   const deleteSkill = useSkillsStore((state) => state.deleteSkill);
-  const reinstallSkill = useSkillsStore((state) => state.reinstallSkill);
 
   useEffect(() => {
     if (!skillId) {
@@ -120,31 +119,8 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
             </div>
           ) : (
             <div className="flex items-center gap-2">
-              {detail.packageName && (
-                <button
-                  disabled={reinstalling || deleting}
-                  onClick={async () => {
-                    if (!confirm(`确认重新安装技能「${detail.name}」？`)) return;
-                    setReinstalling(true);
-                    try {
-                      await reinstallSkill(detail.id);
-                      // Reload detail after reinstall
-                      const data = await getSkillDetail(detail.id);
-                      setDetail(data);
-                    } catch {
-                      // error handled by store
-                    } finally {
-                      setReinstalling(false);
-                    }
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950 transition-colors disabled:opacity-50"
-                >
-                  <RefreshCw size={16} className={reinstalling ? 'animate-spin' : ''} />
-                  {reinstalling ? '重装中...' : '重新安装'}
-                </button>
-              )}
               <button
-                disabled={deleting || reinstalling}
+                disabled={deleting}
                 onClick={async () => {
                   if (!confirm(`确认删除技能「${detail.name}」？`)) return;
                   setDeleting(true);
@@ -246,9 +222,7 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
           {detail.source === 'user'
             ? detail.syncedFromHost
               ? '从宿主机同步，可启停和删除。重新同步时会恢复'
-              : detail.packageName
-                ? `通过 ${detail.packageName} 安装，可重新安装以获取最新版本`
-                : '用户级技能可启用/禁用或删除，也可在对话中让 AI 安装或卸载技能'
+              : '用户级技能可启用/禁用或删除，也可在对话中让 AI 安装或卸载技能'
             : '项目级技能为只读，不可修改或删除'}
         </p>
       </div>

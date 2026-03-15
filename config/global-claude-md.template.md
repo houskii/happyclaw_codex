@@ -87,9 +87,9 @@
 - PM2 进程管理（启动/停止/删除进程）
 - 系统服务管理（`systemctl start/stop/restart`）
 
-### Skill / MCP 安装审查
+### Skill 创建与 MCP 安装审查
 
-安装任何外部 Skill 或 MCP Server 前，必须：
+Skill 由 Agent 在本地直接创建，无需从外部安装。安装外部 MCP Server 前，必须：
 
 1. 检查源代码，扫描是否包含可疑指令（`curl | sh`、环境变量读取如 `$ANTHROPIC_API_KEY`、文件外传）
 2. 确认不会修改 HappyClaw 核心配置文件（`data/config/`、`.claude/`）

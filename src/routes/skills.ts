@@ -4,8 +4,6 @@ import { Hono } from 'hono';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
@@ -18,9 +16,6 @@ import {
   listFiles,
   scanSkillDirectory,
 } from '../skill-utils.js';
-
-const execFileAsync = promisify(execFile);
-let skillInstallLock: Promise<void> = Promise.resolve();
 
 const skillsRoutes = new Hono<{ Variables: Variables }>();
 
@@ -60,15 +55,6 @@ interface SkillsManifest {
       source: string;
     }
   >;
-}
-
-interface SearchResult {
-  package: string;
-  url: string;
-  description?: string;
-  installs?: number;
-  skillId?: string;
-  source?: string;
 }
 
 // --- Utility Functions ---
@@ -126,26 +112,6 @@ function writeSkillsManifest(userId: string, manifest: SkillsManifest): void {
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 }
 
-/**
- * Update the skills manifest after installing skills.
- * Records packageName, installedAt, and source for each installed skill.
- */
-function updateSkillsManifest(
-  userId: string,
-  packageName: string,
-  installedSkillIds: string[],
-): void {
-  const manifest = readSkillsManifest(userId);
-  const now = new Date().toISOString();
-  for (const id of installedSkillIds) {
-    manifest.skills[id] = {
-      packageName,
-      installedAt: now,
-      source: 'skills.sh',
-    };
-  }
-  writeSkillsManifest(userId, manifest);
-}
 
 /**
  * Remove a skill from the manifest when it is deleted.
@@ -269,87 +235,6 @@ function getSkillDetail(skillId: string, userId: string): SkillDetail | null {
 }
 
 /**
- * Parse the output of `npx skills find <query>` to extract search results.
- * The output contains ANSI codes and formatted text like:
- *   owner/repo@skill-name
- *   https://skills.sh/owner/repo/skill
- */
-function parseSearchOutput(output: string): SearchResult[] {
-  // Strip ANSI escape codes
-  const clean = output.replace(/\x1b\[[0-9;]*m/g, '');
-  const results: SearchResult[] = [];
-
-  const lines = clean
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    // Match package pattern: owner/repo or owner/repo@skill
-    const pkgMatch = line.match(/^([\w\-]+\/[\w\-.]+(?:@[\w\-.]+)?)$/);
-    if (pkgMatch) {
-      const pkg = pkgMatch[1];
-      // Next line might be the URL (possibly prefixed with └ or similar chars)
-      let url = '';
-      if (i + 1 < lines.length) {
-        const nextLine = lines[i + 1].replace(/^[└├│─\s]+/, '');
-        if (nextLine.startsWith('http')) {
-          url = nextLine;
-          i++;
-        }
-      }
-      results.push({ package: pkg, url });
-    }
-  }
-
-  return results;
-}
-
-/**
- * Find skill entries under a path that were modified after the given timestamp.
- * Handles both real directories and symlinks (skills CLI creates symlinks in
- * ~/.claude/skills/ pointing to ~/.agents/skills/).
- * Returns entry names.
- */
-function findModifiedEntries(dir: string, afterMs: number): string[] {
-  const result: string[] = [];
-  if (!fs.existsSync(dir)) return result;
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      try {
-        // Use lstat for symlinks, stat (follows symlink) for mtime of real target
-        const lstat = fs.lstatSync(fullPath);
-
-        if (lstat.isSymbolicLink()) {
-          // Symlink: check both the symlink creation time and target mtime
-          if (lstat.mtimeMs >= afterMs) {
-            result.push(entry.name);
-            continue;
-          }
-          // Also check the resolved target's mtime
-          const realStat = fs.statSync(fullPath);
-          if (realStat.mtimeMs >= afterMs) {
-            result.push(entry.name);
-          }
-        } else if (lstat.isDirectory()) {
-          if (lstat.mtimeMs >= afterMs) {
-            result.push(entry.name);
-          }
-        }
-      } catch {
-        // skip broken symlinks etc.
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return result;
-}
-
-/**
  * Copy a skill entry (directory or symlink target) to dest.
  * Resolves symlinks and copies the real content so the copy is self-contained.
  */
@@ -368,157 +253,6 @@ function copySkillToUser(src: string, dest: string): void {
   fs.cpSync(realSrc, dest, { recursive: true });
 }
 
-// --- Search cache (LRU, 5min TTL, max 100 entries) ---
-
-interface CacheEntry<T> {
-  value: T;
-  expiresAt: number;
-}
-
-const SEARCH_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-const SEARCH_CACHE_MAX = 100;
-const searchCache = new Map<string, CacheEntry<SearchResult[]>>();
-
-function getCachedSearch(key: string): SearchResult[] | null {
-  const entry = searchCache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    searchCache.delete(key);
-    return null;
-  }
-  return entry.value;
-}
-
-function setCachedSearch(key: string, value: SearchResult[]): void {
-  // Evict oldest if at capacity
-  if (searchCache.size >= SEARCH_CACHE_MAX) {
-    const oldest = searchCache.keys().next().value;
-    if (oldest !== undefined) searchCache.delete(oldest);
-  }
-  searchCache.set(key, { value, expiresAt: Date.now() + SEARCH_CACHE_TTL });
-}
-
-/**
- * Search skills via skills.sh API.
- * Returns structured results with install counts.
- */
-async function searchSkillsApi(query: string): Promise<SearchResult[]> {
-  const cached = getCachedSearch(query);
-  if (cached) return cached;
-
-  try {
-    const resp = await fetch(
-      `https://skills.sh/api/search?q=${encodeURIComponent(query)}&limit=20`,
-      { signal: AbortSignal.timeout(10_000) },
-    );
-    if (!resp.ok) throw new Error(`skills.sh returned ${resp.status}`);
-
-    const data = (await resp.json()) as {
-      skills?: Array<{
-        id: string;
-        skillId: string;
-        name: string;
-        installs: number;
-        source: string;
-      }>;
-    };
-
-    const results: SearchResult[] = (data.skills || []).map((s) => ({
-      package:
-        s.source === s.skillId || !s.skillId
-          ? s.source
-          : `${s.source}@${s.skillId}`,
-      url: `https://skills.sh/s/${s.id}`,
-      description: '',
-      installs: s.installs,
-      skillId: s.skillId,
-      source: s.source,
-    }));
-
-    setCachedSearch(query, results);
-    return results;
-  } catch {
-    // Fallback to npx skills find
-    return searchSkillsFallback(query);
-  }
-}
-
-/**
- * Fallback search using npx skills find CLI.
- */
-async function searchSkillsFallback(query: string): Promise<SearchResult[]> {
-  try {
-    const { stdout } = await execFileAsync(
-      'npx',
-      ['-y', 'skills', 'find', query],
-      { timeout: 30_000 },
-    );
-    return parseSearchOutput(stdout);
-  } catch (error) {
-    if (error && typeof error === 'object' && 'stdout' in error) {
-      const results = parseSearchOutput((error as any).stdout || '');
-      if (results.length > 0) return results;
-    }
-    return [];
-  }
-}
-
-/**
- * Fetch SKILL.md content from GitHub for a given source repo and skill ID.
- * Tries multiple common directory layouts.
- */
-async function fetchSkillMdFromGitHub(
-  source: string,
-  skillId: string,
-): Promise<{ content: string; description: string; skillName: string } | null> {
-  // Try common paths where SKILL.md might live
-  const pathCandidates = [
-    `skills/${skillId}/SKILL.md`,
-    `${skillId}/SKILL.md`,
-    `.claude/skills/${skillId}/SKILL.md`,
-    `SKILL.md`,
-  ];
-
-  for (const branch of ['main', 'master']) {
-    for (const filePath of pathCandidates) {
-      try {
-        const url = `https://raw.githubusercontent.com/${source}/${branch}/${filePath}`;
-        const resp = await fetch(url, { signal: AbortSignal.timeout(8_000) });
-        if (!resp.ok) continue;
-
-        const content = await resp.text();
-        // Verify it looks like a SKILL.md (has frontmatter)
-        if (!content.startsWith('---')) continue;
-
-        const frontmatter = parseFrontmatter(content);
-        return {
-          content,
-          description: frontmatter.description || '',
-          skillName: frontmatter.name || skillId,
-        };
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  return null;
-}
-
-async function withSkillInstallLock<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = skillInstallLock.catch(() => undefined);
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  skillInstallLock = previous.then(() => current);
-  await previous;
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
 
 // --- Routes ---
 
@@ -528,80 +262,6 @@ skillsRoutes.get('/', authMiddleware, (c) => {
   return c.json({ skills });
 });
 
-skillsRoutes.get('/search', authMiddleware, async (c) => {
-  const query = c.req.query('q')?.trim();
-  if (!query) {
-    return c.json({ results: [] });
-  }
-
-  const results = await searchSkillsApi(query);
-  return c.json({ results });
-});
-
-skillsRoutes.get('/search/detail', authMiddleware, async (c) => {
-  const source = c.req.query('source')?.trim();
-  const skillId = c.req.query('skillId')?.trim();
-
-  // Support legacy url-based lookup for backwards compat
-  const url = c.req.query('url')?.trim();
-
-  if (source && skillId) {
-    // New path: fetch SKILL.md from GitHub using source/skillId
-    const result = await fetchSkillMdFromGitHub(source, skillId);
-    if (!result) {
-      return c.json({ detail: null });
-    }
-
-    return c.json({
-      detail: {
-        description: result.description,
-        skillName: result.skillName,
-        readme: result.content,
-        installs: '',
-        age: '',
-        features: [],
-      },
-    });
-  }
-
-  // Legacy: extract source/skillId from skills.sh URL
-  if (url) {
-    try {
-      const parsed = new URL(url);
-      if (parsed.hostname === 'skills.sh') {
-        // URL pattern: https://skills.sh/s/{owner}/{repo}/{skillId}
-        const segments = parsed.pathname
-          .replace(/^\/s\//, '')
-          .split('/')
-          .filter(Boolean);
-        if (segments.length >= 3) {
-          const srcFromUrl = `${segments[0]}/${segments[1]}`;
-          const skillIdFromUrl = segments[2];
-          const result = await fetchSkillMdFromGitHub(
-            srcFromUrl,
-            skillIdFromUrl,
-          );
-          if (result) {
-            return c.json({
-              detail: {
-                description: result.description,
-                skillName: result.skillName,
-                readme: result.content,
-                installs: '',
-                age: '',
-                features: [],
-              },
-            });
-          }
-        }
-      }
-    } catch {
-      // fall through
-    }
-  }
-
-  return c.json({ detail: null });
-});
 
 // Get sync status (last sync time + auto-sync config)
 skillsRoutes.get('/sync-status', authMiddleware, (c) => {
@@ -748,182 +408,120 @@ skillsRoutes.delete('/:id', authMiddleware, async (c) => {
   return c.json({ success: true });
 });
 
-/**
- * Install a skill package for a specific user.
- * Uses a temporary HOME directory to isolate `npx skills add --global` from
- * the real ~/.claude/skills, eliminating race conditions across concurrent installs.
- * Reusable by both the HTTP route and IPC handler.
- */
-async function installSkillForUser(
-  userId: string,
-  pkg: string,
-): Promise<{ success: boolean; installed?: string[]; error?: string }> {
-  if (
-    !/^[\w\-]+\/[\w\-.]+(?:[@#][\w\-.\/]+)?$/.test(pkg) &&
-    !/^https?:\/\//.test(pkg)
-  ) {
-    return { success: false, error: 'Invalid package name format' };
+// Sync host-level skills (~/.claude/skills/) to admin's user-level directory.
+// Only admin can use this endpoint.
+skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
+  const authUser = c.get('user') as AuthUser;
+  if (authUser.role !== 'admin') {
+    return c.json({ error: 'Only admin can sync host skills' }, 403);
   }
 
-  // Create an isolated temp directory to act as HOME so `--global` installs
-  // into tempHome/.claude/skills/ instead of the real ~/.claude/skills/.
-  // This avoids any race condition when multiple installs run concurrently.
-  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-install-'));
-  const tempSkillsDir = path.join(tempHome, '.claude', 'skills');
-  fs.mkdirSync(tempSkillsDir, { recursive: true });
+  const hostDir = getGlobalSkillsDir();
+  const userDir = getUserSkillsDir(authUser.id);
+  fs.mkdirSync(userDir, { recursive: true });
 
-  try {
-    await execFileAsync(
-      'npx',
-      ['-y', 'skills', 'add', pkg, '--global', '--yes', '-a', 'claude-code'],
-      {
-        timeout: 60_000,
-        env: { ...process.env, HOME: tempHome },
-      },
-    );
-
-    // Discover all skill directories installed into the temp location
-    const installedEntries: string[] = [];
-    if (fs.existsSync(tempSkillsDir)) {
-      for (const entry of fs.readdirSync(tempSkillsDir, {
-        withFileTypes: true,
-      })) {
-        if (entry.isDirectory() || entry.isSymbolicLink()) {
-          installedEntries.push(entry.name);
+  // 1. 扫描宿主机 skills
+  const hostSkillNames: string[] = [];
+  if (fs.existsSync(hostDir)) {
+    for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const skillDir = path.join(hostDir, entry.name);
+      // 验证包含 SKILL.md 或 SKILL.md.disabled
+      try {
+        const realPath = fs.realpathSync(skillDir);
+        if (
+          fs.existsSync(path.join(realPath, 'SKILL.md')) ||
+          fs.existsSync(path.join(realPath, 'SKILL.md.disabled'))
+        ) {
+          hostSkillNames.push(entry.name);
         }
+      } catch {
+        // 跳过 broken symlinks
       }
-    }
-
-    if (installedEntries.length === 0) {
-      return {
-        success: false,
-        error: 'No skills were installed — package may be invalid',
-      };
-    }
-
-    // Copy resolved skill content to per-user directory
-    const userDir = getUserSkillsDir(userId);
-    fs.mkdirSync(userDir, { recursive: true });
-
-    for (const name of installedEntries) {
-      const src = path.join(tempSkillsDir, name);
-      const dest = path.join(userDir, name);
-      if (fs.existsSync(dest)) {
-        fs.rmSync(dest, { recursive: true, force: true });
-      }
-      copySkillToUser(src, dest);
-    }
-
-    // Write manifest metadata
-    updateSkillsManifest(userId, pkg, installedEntries);
-
-    return { success: true, installed: installedEntries };
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    };
-  } finally {
-    // Always clean up the temp directory
-    try {
-      fs.rmSync(tempHome, { recursive: true, force: true });
-    } catch {
-      /* ignore cleanup errors */
     }
   }
-}
 
-/**
- * Sync host-level skills (~/.claude/skills/) to a user's directory.
- * Standalone function usable from both the API route and the auto-sync timer.
- */
 async function syncHostSkillsForUser(
   userId: string,
-): Promise<{ stats: { added: number; updated: number; deleted: number; skipped: number }; total: number }> {
-  return withSkillInstallLock(async () => {
-    const hostDir = getGlobalSkillsDir();
-    const userDir = getUserSkillsDir(userId);
-    fs.mkdirSync(userDir, { recursive: true });
+): Promise<{
+  stats: { added: number; updated: number; deleted: number; skipped: number };
+  total: number;
+}> {
+  const hostDir = getGlobalSkillsDir();
+  const userDir = getUserSkillsDir(userId);
+  fs.mkdirSync(userDir, { recursive: true });
 
-    // 1. 扫描宿主机 skills
-    const hostSkillNames: string[] = [];
-    if (fs.existsSync(hostDir)) {
-      for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
-        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-        const skillDir = path.join(hostDir, entry.name);
-        try {
-          const realPath = fs.realpathSync(skillDir);
-          if (
-            fs.existsSync(path.join(realPath, 'SKILL.md')) ||
-            fs.existsSync(path.join(realPath, 'SKILL.md.disabled'))
-          ) {
-            hostSkillNames.push(entry.name);
-          }
-        } catch {
-          // 跳过 broken symlinks
+  const hostSkillNames: string[] = [];
+  if (fs.existsSync(hostDir)) {
+    for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const skillDir = path.join(hostDir, entry.name);
+      try {
+        const realPath = fs.realpathSync(skillDir);
+        if (
+          fs.existsSync(path.join(realPath, 'SKILL.md')) ||
+          fs.existsSync(path.join(realPath, 'SKILL.md.disabled'))
+        ) {
+          hostSkillNames.push(entry.name);
         }
+      } catch {
+        // skip broken symlinks
       }
     }
+  }
 
-    // 2. 读取 manifest
-    const manifest = readHostSyncManifest(userId);
-    const previouslySynced = new Set(manifest.syncedSkills);
+  const manifest = readHostSyncManifest(userId);
+  const previouslySynced = new Set(manifest.syncedSkills);
 
-    // 3. 检测用户目录中手动安装的 skills
-    const existingUserSkills = new Set<string>();
-    if (fs.existsSync(userDir)) {
-      for (const entry of fs.readdirSync(userDir, { withFileTypes: true })) {
-        if (entry.isDirectory()) existingUserSkills.add(entry.name);
-      }
+  const existingUserSkills = new Set<string>();
+  if (fs.existsSync(userDir)) {
+    for (const entry of fs.readdirSync(userDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) existingUserSkills.add(entry.name);
+    }
+  }
+
+  const stats = { added: 0, updated: 0, deleted: 0, skipped: 0 };
+  const newSyncedList: string[] = [];
+
+  for (const name of hostSkillNames) {
+    const isManuallyInstalled =
+      existingUserSkills.has(name) && !previouslySynced.has(name);
+    if (isManuallyInstalled) {
+      stats.skipped++;
+      continue;
     }
 
-    const stats = { added: 0, updated: 0, deleted: 0, skipped: 0 };
-    const newSyncedList: string[] = [];
+    const src = path.join(hostDir, name);
+    const dest = path.join(userDir, name);
 
-    // 4. 同步：新增/更新
-    for (const name of hostSkillNames) {
-      const isManuallyInstalled =
-        existingUserSkills.has(name) && !previouslySynced.has(name);
-      if (isManuallyInstalled) {
-        stats.skipped++;
-        continue;
-      }
+    if (existingUserSkills.has(name)) {
+      fs.rmSync(dest, { recursive: true, force: true });
+      copySkillToUser(src, dest);
+      stats.updated++;
+    } else {
+      copySkillToUser(src, dest);
+      stats.added++;
+    }
+    newSyncedList.push(name);
+  }
 
-      const src = path.join(hostDir, name);
+  const hostSkillSet = new Set(hostSkillNames);
+  for (const name of previouslySynced) {
+    if (!hostSkillSet.has(name) && existingUserSkills.has(name)) {
       const dest = path.join(userDir, name);
-
-      if (existingUserSkills.has(name)) {
-        fs.rmSync(dest, { recursive: true, force: true });
-        copySkillToUser(src, dest);
-        stats.updated++;
-      } else {
-        copySkillToUser(src, dest);
-        stats.added++;
-      }
-      newSyncedList.push(name);
+      fs.rmSync(dest, { recursive: true, force: true });
+      stats.deleted++;
     }
+  }
 
-    // 5. 删除宿主机已移除的（仅清理之前同步来的）
-    const hostSkillSet = new Set(hostSkillNames);
-    for (const name of previouslySynced) {
-      if (!hostSkillSet.has(name) && existingUserSkills.has(name)) {
-        const dest = path.join(userDir, name);
-        fs.rmSync(dest, { recursive: true, force: true });
-        stats.deleted++;
-      }
-    }
-
-    // 6. 更新 manifest
-    writeHostSyncManifest(userId, {
-      syncedSkills: newSyncedList,
-      lastSyncAt: new Date().toISOString(),
-    });
-
-    return { stats, total: hostSkillNames.length };
+  writeHostSyncManifest(userId, {
+    syncedSkills: newSyncedList,
+    lastSyncAt: new Date().toISOString(),
   });
+
+  return { stats, total: hostSkillNames.length };
 }
 
-// Sync host-level skills — API endpoint (admin only).
 skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   if (authUser.role !== 'admin') {
@@ -933,68 +531,5 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
   const result = await syncHostSkillsForUser(authUser.id);
   return c.json(result);
 });
-
-skillsRoutes.post('/install', authMiddleware, async (c) => {
-  const authUser = c.get('user') as AuthUser;
-  const body = await c.req.json().catch(() => ({}));
-
-  if (typeof body.package !== 'string') {
-    return c.json({ error: 'package field must be string' }, 400);
-  }
-
-  const pkg = body.package.trim();
-  const result = await installSkillForUser(authUser.id, pkg);
-
-  if (!result.success) {
-    return c.json(
-      { error: 'Failed to install skill', details: result.error },
-      result.error === 'Invalid package name format' ? 400 : 500,
-    );
-  }
-
-  return c.json({ success: true, installed: result.installed });
-});
-
-// Reinstall a skill by its ID — requires the skill to have a packageName in the manifest.
-skillsRoutes.post('/:id/reinstall', authMiddleware, async (c) => {
-  const id = c.req.param('id');
-  const authUser = c.get('user') as AuthUser;
-
-  if (!validateSkillId(id)) {
-    return c.json({ error: 'Invalid skill ID' }, 400);
-  }
-
-  const manifest = readSkillsManifest(authUser.id);
-  const meta = manifest.skills[id];
-  if (!meta?.packageName) {
-    return c.json(
-      { error: 'Skill has no package info — cannot reinstall' },
-      400,
-    );
-  }
-
-  // Delete then reinstall
-  const deleteResult = deleteSkillForUser(authUser.id, id);
-  if (!deleteResult.success) {
-    return c.json(
-      { error: 'Failed to delete old skill', details: deleteResult.error },
-      500,
-    );
-  }
-
-  const installResult = await installSkillForUser(
-    authUser.id,
-    meta.packageName,
-  );
-  if (!installResult.success) {
-    return c.json(
-      { error: 'Failed to reinstall skill', details: installResult.error },
-      500,
-    );
-  }
-
-  return c.json({ success: true, installed: installResult.installed });
-});
-
-export { getUserSkillsDir, installSkillForUser, deleteSkillForUser, syncHostSkillsForUser };
+export { getUserSkillsDir, deleteSkillForUser, syncHostSkillsForUser };
 export default skillsRoutes;
