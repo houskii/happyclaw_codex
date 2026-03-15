@@ -707,6 +707,13 @@ async function runQuery(
     if (queryActivityTimer) clearTimeout(queryActivityTimer);
     queryActivityTimer = setTimeout(() => {
       if (!ipcPolling) return; // query already ended
+      // Don't interrupt while background sub-agents are still running —
+      // they won't produce events on the main iterator but are doing real work.
+      if (processor.pendingBackgroundTaskCount > 0) {
+        log(`Activity timeout skipped: ${processor.pendingBackgroundTaskCount} background task(s) still running, extending timer`);
+        resetQueryActivityTimer();
+        return;
+      }
       log(`Query activity timeout: no SDK events for ${QUERY_ACTIVITY_TIMEOUT_MS}ms, forcing interrupt`);
       interruptedDuringQuery = true;
       queryRef?.interrupt().catch((err: unknown) => log(`Activity timeout interrupt failed: ${err}`));

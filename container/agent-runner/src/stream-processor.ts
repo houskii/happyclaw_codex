@@ -77,6 +77,11 @@ export class StreamEventProcessor {
   // Sub-agent active tools per parent task ID
   private readonly activeSubAgentToolsByTask = new Map<string, Set<string>>();
 
+  /** Number of background Task sub-agents still running. */
+  get pendingBackgroundTaskCount(): number {
+    return this.backgroundTaskToolUseIds.size;
+  }
+
   constructor(emit: EmitFn, log: LogFn, onModeChangeRequest?: ModeChangeRequestFn) {
     this.emit = emit;
     this.log = log;
