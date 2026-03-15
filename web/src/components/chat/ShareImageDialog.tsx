@@ -4,7 +4,12 @@ import { X, Download, RefreshCw } from 'lucide-react';
 import { toPng } from 'html-to-image';
 import { Message } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
-import { ShareCardRenderer } from './ShareCardRenderer';
+import {
+  ShareCardRenderer,
+  SHARE_CARD_DEFAULT_WIDTH,
+  SHARE_CARD_MAX_WIDTH,
+  SHARE_CARD_PADDING,
+} from './ShareCardRenderer';
 
 interface ShareImageDialogProps {
   open: boolean;
@@ -80,7 +85,27 @@ export function ShareImageDialog({ open, onClose, message }: ShareImageDialogPro
     }
 
     try {
+      // Phase 1: Expand card to measure natural table widths (no wrapping constraint)
+      el.style.width = `${SHARE_CARD_MAX_WIDTH}px`;
+      await new Promise((r) => requestAnimationFrame(r));
+
       await waitForRenderComplete(el);
+
+      // Measure widest table to determine optimal card width
+      const tables = el.querySelectorAll('table');
+      let maxTableWidth = 0;
+      tables.forEach((table) => {
+        maxTableWidth = Math.max(maxTableWidth, table.scrollWidth);
+      });
+
+      // Phase 2: Set card to optimal width — fits tables while capping at max
+      const cardWidth = Math.max(
+        SHARE_CARD_DEFAULT_WIDTH,
+        Math.min(maxTableWidth + SHARE_CARD_PADDING, SHARE_CARD_MAX_WIDTH),
+      );
+      el.style.width = `${cardWidth}px`;
+      await new Promise((r) => requestAnimationFrame(r));
+
       const url = await toPng(el, {
         pixelRatio: 2,
         cacheBust: true,

@@ -50,11 +50,14 @@ const LIGHT_THEME_VARS: React.CSSProperties = {
 } as React.CSSProperties;
 
 const MAX_HEIGHT = 20000;
+export const SHARE_CARD_DEFAULT_WIDTH = 720;
+export const SHARE_CARD_MAX_WIDTH = 1200;
+export const SHARE_CARD_PADDING = 48; // 24px * 2
 
 /**
  * Override styles for the share card content area.
- * Forces all content to wrap within the fixed card width (720px)
- * instead of overflowing or creating horizontal scroll.
+ * Tables are allowed to expand the card width (up to MAX_WIDTH).
+ * Non-table content wraps at whatever the current card width is.
  */
 const CONTENT_OVERRIDE_STYLE = `
   .share-card-content {
@@ -88,7 +91,7 @@ export const ShareCardRenderer = forwardRef<HTMLDivElement, ShareCardRendererPro
         ref={ref}
         style={{
           ...LIGHT_THEME_VARS,
-          width: 720,
+          minWidth: SHARE_CARD_DEFAULT_WIDTH,
           fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
           background: '#ffffff',
           color: '#0f172a',
