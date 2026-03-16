@@ -665,6 +665,12 @@ function setupWebSocket(server: any): WebSocketServer {
                 targetGroup,
               )
             ) {
+              const accessDeniedMsg: WsMessageOut = {
+                type: 'ws_error',
+                error: '无权访问该群组',
+                chatJid,
+              };
+              ws.send(JSON.stringify(accessDeniedMsg));
               logger.warn(
                 { chatJid, userId: session.user_id },
                 'WebSocket send_message blocked: access denied',
@@ -673,6 +679,12 @@ function setupWebSocket(server: any): WebSocketServer {
             }
             if (isHostExecutionGroup(targetGroup)) {
               if (session.role !== 'admin') {
+                const hostModeMsg: WsMessageOut = {
+                  type: 'ws_error',
+                  error: '宿主机模式需要管理员权限',
+                  chatJid,
+                };
+                ws.send(JSON.stringify(hostModeMsg));
                 logger.warn(
                   { chatJid, userId: session.user_id },
                   'WebSocket send_message blocked: host mode requires admin',

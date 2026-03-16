@@ -8,6 +8,7 @@ function sanitizeSvg(raw: string): string {
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { svg: true, svgFilters: true },
     ADD_TAGS: ['foreignObject'],
+    FORBID_TAGS: ['script', 'iframe', 'object', 'embed'],
   });
 }
 
