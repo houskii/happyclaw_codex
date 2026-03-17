@@ -243,7 +243,17 @@ process.on('uncaughtException', (err: unknown) => {
   process.exit(1);
 });
 
-process.on('unhandledRejection', (reason) => {
+process.on('unhandledRejection', (reason: unknown) => {
+  const errno = reason as NodeJS.ErrnoException;
+  if (errno?.code === 'EPIPE') {
+    process.exit(0);
+  }
+  // ProcessTransport may already be closed when IPC polling races with query completion.
+  // The lost message is acceptable here; the process should stay alive for the next query.
+  if (reason instanceof Error && /ProcessTransport is not ready/i.test(reason.message)) {
+    console.error('[agent-runner] ProcessTransport not ready (non-fatal, query ended):', reason.message);
+    return;
+  }
   if (state.isWithinInterruptGraceWindow() && isInterruptRelatedError(reason)) {
     console.error('Suppressing interrupt-related unhandled rejection:', reason);
     return;
