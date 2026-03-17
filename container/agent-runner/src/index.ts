@@ -1029,6 +1029,16 @@ async function runQuery(
     }
 
     if (message.type === 'result') {
+      // Stop IPC polling and end the input stream immediately.
+      // After the SDK produces a result, the underlying ProcessTransport may close
+      // (especially for fresh sessions). Any subsequent stream.push() would trigger
+      // an unhandled "ProcessTransport is not ready for writing" rejection.
+      // Remaining IPC messages stay in the filesystem and will be picked up by
+      // the main loop's waitForIpcMessage().
+      ipcPolling = false;
+      if (queryActivityTimer) clearTimeout(queryActivityTimer);
+      stream.end();
+
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       const resultSubtype = message.subtype;
@@ -1416,6 +1426,13 @@ process.on('unhandledRejection', (reason: unknown) => {
   const errno = reason as NodeJS.ErrnoException;
   if (errno?.code === 'EPIPE') {
     process.exit(0);
+  }
+  // ProcessTransport closed — can happen if IPC poll races with query completion.
+  // The message that triggered this was already consumed from IPC and is lost,
+  // but the process should not crash. The main loop will pick up subsequent messages.
+  if (reason instanceof Error && /ProcessTransport is not ready/i.test(reason.message)) {
+    console.error('[agent-runner] ProcessTransport not ready (non-fatal, query ended):', reason.message);
+    return;
   }
   if (isWithinInterruptGraceWindow()) {
     console.error('Unhandled rejection during interrupt (non-fatal):', reason);
