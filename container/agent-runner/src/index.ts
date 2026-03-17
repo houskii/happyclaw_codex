@@ -736,6 +736,10 @@ async function runQuery(
   let ipcPolling = true;
   let closedDuringQuery = false;
   let interruptedDuringQuery = false;
+  // When true, the main result has been emitted but we're waiting for background
+  // tasks to finish.  IPC polling is stopped (to avoid push-after-close crashes)
+  // but the for-await loop stays alive to receive task_notifications.
+  let waitingForBackgroundTasks = false;
 
   // Query activity watchdog: if the SDK for-await loop yields no events for
   // QUERY_ACTIVITY_TIMEOUT_MS, the API call is likely hung.  Force an interrupt
@@ -747,7 +751,7 @@ async function runQuery(
     lastEventAt = Date.now();
     if (queryActivityTimer) clearTimeout(queryActivityTimer);
     queryActivityTimer = setTimeout(() => {
-      if (!ipcPolling) return; // query already ended
+      if (!ipcPolling && !waitingForBackgroundTasks) return; // query already ended
       // Don't interrupt while background sub-agents are still running —
       // they won't produce events on the main iterator but are doing real work.
       if (processor.pendingBackgroundTaskCount > 0) {
@@ -764,6 +768,7 @@ async function runQuery(
       }
       log(`Query activity timeout: no SDK events for ${QUERY_ACTIVITY_TIMEOUT_MS}ms, forcing interrupt`);
       interruptedDuringQuery = true;
+      waitingForBackgroundTasks = false;
       queryRef?.interrupt().catch((err: unknown) => log(`Activity timeout interrupt failed: ${err}`));
       stream.end();
       ipcPolling = false;
@@ -875,6 +880,9 @@ async function runQuery(
     '这样用户无需等待，可以继续与你交流其他事项。',
     '任务结束时你会自动收到通知，届时使用 send_message 向用户汇报即可。',
     '告知用户：「已为您在后台启动该任务，完成后我会第一时间反馈。现在有其他问题也可以随时问我。」',
+    '',
+    '**重要**：启动后台任务后，不要使用 TaskOutput 去阻塞等待结果——系统会自动通知你。',
+    '你可以继续回答用户的其他问题，当后台任务完成时，你会收到通知并可以立即汇报结果。',
   ].join('\n');
 
   // Interaction guidelines to prevent the agent from confusing MCP tool
@@ -1029,28 +1037,25 @@ async function runQuery(
     }
 
     if (message.type === 'result') {
-      // Stop IPC polling and end the input stream immediately.
-      // After the SDK produces a result, the underlying ProcessTransport may close
-      // (especially for fresh sessions). Any subsequent stream.push() would trigger
-      // an unhandled "ProcessTransport is not ready for writing" rejection.
+      // Always stop IPC polling to avoid push-after-close crashes on ProcessTransport.
       // Remaining IPC messages stay in the filesystem and will be picked up by
       // the main loop's waitForIpcMessage().
       ipcPolling = false;
-      if (queryActivityTimer) clearTimeout(queryActivityTimer);
-      stream.end();
 
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       const resultSubtype = message.subtype;
       log(`Result #${resultCount}: subtype=${resultSubtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
 
+      // ── Error results: always end the stream immediately ──
+      // These paths return/throw, so stream must be closed before exiting.
+
       // SDK 在某些失败场景会返回 error_* subtype 且不抛异常。
-      // 不能把这类结果当 success(null)，否则前端会一直停留在"思考中"。
-      // 匹配策略：显式枚举已知的 error subtype，并用 startsWith('error') 兜底未知的未来 error subtype。
-      // 参考 SDK result subtype 约定：error_during_execution、error_max_turns 等均以 'error' 开头。
+      // 匹配策略：显式枚举已知的 error subtype，并用 startsWith('error') 兜底。
       if (typeof resultSubtype === 'string' && (resultSubtype === 'error_during_execution' || resultSubtype.startsWith('error'))) {
-        // If session never initialized (no system/init), resume itself failed — report it
-        // so the caller can retry with a fresh session instead of crashing.
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        stream.end();
         if (!newSessionId) {
           log(`Session resume failed (no init): ${resultSubtype}`);
           return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, sessionResumeFailed: true };
@@ -1063,14 +1068,36 @@ async function runQuery(
 
       // SDK 将某些 API 错误包装为 subtype=success 的 result（不抛异常）
       if (textResult && isContextOverflowError(textResult)) {
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        stream.end();
         log(`Context overflow detected in result: ${textResult.slice(0, 100)}`);
         processor.resetFullTextAccumulator();
         return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery };
       }
       if (textResult && isUnrecoverableTranscriptError(textResult)) {
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        stream.end();
         log(`Unrecoverable transcript error in result: ${textResult.slice(0, 200)}`);
         processor.resetFullTextAccumulator();
         return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery };
+      }
+
+      // ── Successful result: check for pending background tasks ──
+
+      if (processor.pendingBackgroundTaskCount > 0) {
+        // Background tasks still running — keep the for-await loop alive so we
+        // receive task_notification messages.  The SDK will re-invoke the model
+        // when a background task completes, producing another result.
+        log(`Result received but ${processor.pendingBackgroundTaskCount} background task(s) pending, keeping query alive`);
+        waitingForBackgroundTasks = true;
+        resetQueryActivityTimer();
+      } else {
+        // No background tasks — safe to end the stream.
+        if (queryActivityTimer) clearTimeout(queryActivityTimer);
+        waitingForBackgroundTasks = false;
+        stream.end();
       }
 
       const { effectiveResult } = processor.processResult(textResult);
