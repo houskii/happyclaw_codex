@@ -57,7 +57,7 @@ export function AppLayout() {
     const unsub = wsManager.on('runner_state', (data: any) => {
       if (data.chatJid && data.state) {
         useGroupsStore.getState().setRunnerState(data.chatJid, data.state);
-        useChatStore.getState().handleRunnerState(data.chatJid, data.state);
+        useChatStore.getState().handleRunnerState(data.chatJid, data.state, data.detail);
       }
     });
     return () => { unsub(); };

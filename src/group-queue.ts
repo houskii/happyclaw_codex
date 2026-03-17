@@ -66,6 +66,9 @@ export class GroupQueue {
   private onRunnerStateChangeFn:
     | ((chatJid: string, state: 'idle' | 'running') => void)
     | null = null;
+  private lifecycleEmitter:
+    | ((groupJid: string, state: string, detail?: string) => void)
+    | null = null;
   private userConcurrentLimitFn:
     | ((groupJid: string) => { allowed: boolean })
     | null = null;
@@ -105,6 +108,12 @@ export class GroupQueue {
 
   setHostModeChecker(fn: (groupJid: string) => boolean): void {
     this.hostModeChecker = fn;
+  }
+
+  setLifecycleEmitter(
+    fn: (groupJid: string, state: string, detail?: string) => void,
+  ): void {
+    this.lifecycleEmitter = fn;
   }
 
   setSerializationKeyResolver(fn: (groupJid: string) => string): void {
@@ -307,6 +316,7 @@ export class GroupQueue {
     if (state.active || (activeRunner && activeRunner !== groupJid)) {
       state.pendingMessages = true;
       this.waitingGroups.add(groupJid);
+      this.lifecycleEmitter?.(groupJid, 'queued');
       // Write _drain to the actual active runner so sibling JIDs sharing one
       // folder also unblock immediately instead of waiting for idle timeout.
       this.requestDrainForActiveRunner(
@@ -324,6 +334,11 @@ export class GroupQueue {
       const isHost = this.isHostMode(groupJid);
       state.pendingMessages = true;
       this.waitingGroups.add(groupJid);
+      this.lifecycleEmitter?.(
+        groupJid,
+        'capacity_wait',
+        isHost ? '宿主机并发已满' : '容器并发已满',
+      );
       logger.debug(
         {
           groupJid,

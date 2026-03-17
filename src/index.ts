@@ -5918,6 +5918,7 @@ function recoverPendingMessages(): void {
         'Recovery: found unprocessed messages',
       );
       recoveryGroups.add(chatJid);
+      broadcastRunnerState(chatJid, 'queued');
       queue.enqueueMessageCheck(chatJid);
     }
   }
@@ -5992,6 +5993,7 @@ function recoverConversationAgents(): void {
 
         // Enqueue the agent conversation for processing
         const taskId = `agent-recover:${agentId}:${Date.now()}`;
+        broadcastRunnerState(virtualChatJid, 'queued');
         queue.enqueueTask(virtualChatJid, taskId, async () => {
           await processAgentConversation(chatJid, agentId);
         });

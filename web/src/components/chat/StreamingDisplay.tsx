@@ -482,6 +482,7 @@ const EMPTY_AGENTS: AgentInfo[] = [];
 export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNameProp = 'AI', agentId }: StreamingDisplayProps) {
   const mainStreaming = useChatStore(s => s.streaming[groupJid]);
   const agentStreamingState = useChatStore(s => agentId ? s.agentStreaming[agentId] : undefined);
+  const runnerState = useChatStore(s => !agentId ? s.runnerState[groupJid] : undefined);
   const streaming = agentId ? agentStreamingState : mainStreaming;
   // Task agents — only shown in main conversation (not inside agent tabs)
   const allAgents = useChatStore(s => !agentId ? (s.agents[groupJid] ?? EMPTY_AGENTS) : EMPTY_AGENTS);
@@ -607,8 +608,23 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
   // 仅在既不等待也无冻结数据时才隐藏
   if (!isWaiting && !hasStreamData) return null;
 
-  // Waiting but no stream data: show empty AI card with bouncing dots
+  // Waiting but no stream data: show empty AI card with lifecycle status
   if (isWaiting && !hasStreamData) {
+    const statusText = (() => {
+      if (!runnerState) return '正在思考...';
+      switch (runnerState.state) {
+        case 'queued':
+          return '消息已接收，准备处理...';
+        case 'capacity_wait':
+          return runnerState.detail
+            ? `等待可用资源（${runnerState.detail}）...`
+            : '等待可用资源...';
+        case 'starting':
+          return '正在启动 Agent...';
+        default:
+          return '正在思考...';
+      }
+    })();
     if (isCompact) {
       return (
         <div className="mb-2 border-b border-border pb-2">
@@ -619,7 +635,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
             <span className="w-1.5 h-1.5 bg-brand-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
             <span className="w-1.5 h-1.5 bg-brand-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
             <span className="w-1.5 h-1.5 bg-brand-400 rounded-full animate-bounce" />
-            <span className="text-sm text-muted-foreground ml-1">正在思考...</span>
+            <span className="text-sm text-muted-foreground ml-1">{statusText}</span>
           </div>
         </div>
       );
@@ -645,7 +661,7 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
                 <span className="w-2 h-2 bg-brand-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
                 <span className="w-2 h-2 bg-brand-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
                 <span className="w-2 h-2 bg-brand-400 rounded-full animate-bounce" />
-                <span className="text-sm text-muted-foreground ml-1">正在思考...</span>
+                <span className="text-sm text-muted-foreground ml-1">{statusText}</span>
               </div>
             </div>
           </div>

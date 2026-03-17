@@ -358,7 +358,18 @@ export type WsMessageOut =
   | {
       type: 'runner_state';
       chatJid: string;
-      state: 'idle' | 'running';
+      state:
+        | 'queued'
+        | 'capacity_wait'
+        | 'starting'
+        | 'idle'
+        | 'running'
+        | 'interrupting'
+        | 'interrupted'
+        | 'closing'
+        | 'error';
+      agentId?: string;
+      detail?: string;
     }
   | {
       type: 'task_state';

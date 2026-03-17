@@ -1537,6 +1537,32 @@ export function broadcastGroupCreated(
   safeBroadcast({ type: 'group_created', jid, folder, name }, false, allowedUserIds);
 }
 
+export function broadcastRunnerState(
+  chatJid: string,
+  state: string,
+  detail?: string,
+): void {
+  const jid = normalizeHomeJid(chatJid);
+  const allowedUserIds = getGroupAllowedUserIds(chatJid);
+  safeBroadcast(
+    { type: 'runner_state', chatJid: jid, state, detail } as WsMessageOut,
+    isHostGroupJid(chatJid),
+    allowedUserIds,
+  );
+
+  // Clear streaming snapshots when runner goes idle (main + all agent snapshots)
+  if (state === 'idle') {
+    streamingSnapshots.delete(jid);
+    streamingFullTexts.delete(jid);
+    // Collect keys first, then delete (avoid mutating Map during iteration)
+    const agentPrefix = jid + '#agent:';
+    const snapshotKeysToDelete = [...streamingSnapshots.keys()].filter(k => k.startsWith(agentPrefix));
+    const fullTextKeysToDelete = [...streamingFullTexts.keys()].filter(k => k.startsWith(agentPrefix));
+    for (const key of snapshotKeysToDelete) streamingSnapshots.delete(key);
+    for (const key of fullTextKeysToDelete) streamingFullTexts.delete(key);
+  }
+}
+
 export function broadcastBlocksFinalized(
   chatJid: string,
   messageId: string,
@@ -1589,32 +1615,6 @@ export function broadcastAgentStatus(
     resultSummary,
   };
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
-}
-
-export function broadcastRunnerState(
-  chatJid: string,
-  state: 'idle' | 'running',
-): void {
-  const jid = normalizeHomeJid(chatJid);
-  const allowedUserIds = getGroupAllowedUserIds(chatJid);
-  const msg: WsMessageOut = {
-    type: 'runner_state',
-    chatJid: jid,
-    state,
-  };
-  safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
-
-  // Clear streaming snapshots when runner goes idle (main + all agent snapshots)
-  if (state === 'idle') {
-    streamingSnapshots.delete(jid);
-    streamingFullTexts.delete(jid);
-    // Collect keys first, then delete (avoid mutating Map during iteration)
-    const agentPrefix = jid + '#agent:';
-    const snapshotKeysToDelete = [...streamingSnapshots.keys()].filter(k => k.startsWith(agentPrefix));
-    const fullTextKeysToDelete = [...streamingFullTexts.keys()].filter(k => k.startsWith(agentPrefix));
-    for (const key of snapshotKeysToDelete) streamingSnapshots.delete(key);
-    for (const key of fullTextKeysToDelete) streamingFullTexts.delete(key);
-  }
 }
 
 export function broadcastDockerBuildLog(line: string): void {

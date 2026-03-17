@@ -200,6 +200,7 @@ interface ChatState {
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
   blocksCache: Record<string, StreamingBlock[]>;     // messageId → finalized blocks
+  runnerState: Record<string, { state: string; detail?: string }>;
   loadGroups: () => Promise<void>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
@@ -236,7 +237,7 @@ interface ChatState {
   sendAgentMessage: (jid: string, agentId: string, content: string, attachments?: Array<{ data: string; mimeType: string }>) => void;
   refreshAgentMessages: (jid: string, agentId: string) => Promise<void>;
   // Runner state sync
-  handleRunnerState: (chatJid: string, state: string) => void;
+  handleRunnerState: (chatJid: string, state: string, detail?: string) => void;
   // IM binding actions
   loadAvailableImGroups: (jid: string) => Promise<AvailableImGroup[]>;
   bindImGroup: (jid: string, agentId: string, imJid: string, force?: boolean) => Promise<boolean>;
@@ -805,6 +806,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentWaiting: {},
   agentHasMore: {},
   blocksCache: {},
+  runnerState: {},
   drafts: {},
 
   loadGroups: async () => {
@@ -1597,9 +1599,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const next = { ...prev };
       applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
       saveStreamingToSession(chatJid, next);
+      const nextRunnerState = { ...s.runnerState };
+      delete nextRunnerState[chatJid];
       return {
         waiting: { ...s.waiting, [chatJid]: true },
         streaming: { ...s.streaming, [chatJid]: next },
+        runnerState: nextRunnerState,
       };
     });
   },
@@ -1697,7 +1702,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? capBlocksCache({ ...s.blocksCache, [msg.id]: completedBlocks })
           : s.blocksCache;
         const nextStreaming = { ...s.streaming };
+        const nextRunnerState = { ...s.runnerState };
         delete nextStreaming[chatJid];
+        delete nextRunnerState[chatJid];
         const nextPending = { ...s.pendingThinking };
         delete nextPending[chatJid];
 
@@ -1707,6 +1714,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streaming: nextStreaming,
           pendingThinking: nextPending,
           blocksCache: nextBlocksCache,
+          runnerState: nextRunnerState,
           ...(thinkingText ? { thinkingCache: capThinkingCache({ ...s.thinkingCache, [msg.id]: thinkingText }) } : {}),
         };
       }
@@ -2256,7 +2264,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // Runner 状态同步：idle 时清理残留状态，running 时重新启用 stream event 接收
-  handleRunnerState: (chatJid, state) => {
+  handleRunnerState: (chatJid, state, detail) => {
+    set((s) => ({
+      runnerState: { ...s.runnerState, [chatJid]: { state, detail } },
+    }));
     if (state === 'idle') {
       // 冻结的中断状态不清除：等 new_message 或 fallback 定时器处理
       if (get().streaming[chatJid]?.interrupted) return;
@@ -2361,7 +2372,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const thinkingText = next[chatJid]?.thinkingText;
       const preserveThinking = options?.preserveThinking !== false;
       const nextPendingThinking = { ...s.pendingThinking };
+      const nextRunnerState = { ...s.runnerState };
       delete next[chatJid];
+      delete nextRunnerState[chatJid];
       if (preserveThinking && thinkingText) {
         nextPendingThinking[chatJid] = thinkingText;
       } else {
@@ -2397,6 +2410,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         waiting: { ...s.waiting, [chatJid]: false },
         streaming: next,
         pendingThinking: nextPendingThinking,
+        runnerState: nextRunnerState,
         ...(agentStreamingChanged ? { agentStreaming: nextAgentStreaming } : {}),
       };
     });
