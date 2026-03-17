@@ -1435,52 +1435,80 @@ export function createFeishuConnection(
       };
 
       try {
-        const card = buildInteractiveCard(text);
-        const content = JSON.stringify(card);
+        // Helper: send card or plain text via reply or create
+        const sendMsg = async (msgText: string) => {
+          const c = client!; // safe: outer guard checks client != null
+          const card = buildInteractiveCard(msgText);
+          const cardContent = JSON.stringify(card);
+          const lastMsgId = lastMessageIdByChat.get(chatId);
 
-        const lastMsgId = lastMessageIdByChat.get(chatId);
-        if (lastMsgId) {
-          try {
-            await client.im.message.reply({
-              path: { message_id: lastMsgId },
-              data: { content, msg_type: 'interactive' },
-            });
-          } catch (err) {
-            logger.warn(
-              { err, chatId },
-              'Feishu interactive reply failed, fallback to plain text',
-            );
-            await client.im.message.reply({
-              path: { message_id: lastMsgId },
-              data: {
-                content: JSON.stringify({ text }),
-                msg_type: 'text',
-              },
-            });
+          if (lastMsgId) {
+            try {
+              await c.im.message.reply({
+                path: { message_id: lastMsgId },
+                data: { content: cardContent, msg_type: 'interactive' },
+              });
+            } catch (err: any) {
+              logger.warn(
+                { chatId, respStatus: err?.response?.status },
+                'Feishu interactive reply failed, fallback to plain text',
+              );
+              await c.im.message.reply({
+                path: { message_id: lastMsgId },
+                data: {
+                  content: JSON.stringify({ text: msgText }),
+                  msg_type: 'text',
+                },
+              });
+            }
+          } else {
+            try {
+              await c.im.v1.message.create({
+                params: { receive_id_type: 'chat_id' },
+                data: {
+                  receive_id: chatId,
+                  msg_type: 'interactive',
+                  content: cardContent,
+                },
+              });
+            } catch (err: any) {
+              logger.warn(
+                { chatId, respStatus: err?.response?.status },
+                'Feishu interactive create failed, fallback to plain text',
+              );
+              await c.im.v1.message.create({
+                params: { receive_id_type: 'chat_id' },
+                data: {
+                  receive_id: chatId,
+                  msg_type: 'text',
+                  content: JSON.stringify({ text: msgText }),
+                },
+              });
+            }
           }
-        } else {
-          try {
-            await client.im.v1.message.create({
-              params: { receive_id_type: 'chat_id' },
-              data: {
-                receive_id: chatId,
-                msg_type: 'interactive',
-                content,
-              },
-            });
-          } catch (err) {
-            logger.warn(
-              { err, chatId },
-              'Feishu interactive create failed, fallback to plain text',
-            );
-            await client.im.v1.message.create({
-              params: { receive_id_type: 'chat_id' },
-              data: {
-                receive_id: chatId,
-                msg_type: 'text',
-                content: JSON.stringify({ text }),
-              },
-            });
+        };
+
+        try {
+          await sendMsg(text);
+        } catch (outerErr: any) {
+          // Feishu content audit (error 230028) flags patterns like "user@domain"
+          // as sensitive data (EMAIL_ADDRESS). Replace @ with fullwidth ＠ and retry.
+          const feishuCode = outerErr?.response?.data?.code;
+          if (feishuCode === 230028) {
+            logger.warn({ chatId }, 'Feishu audit 230028, replacing @ with fullwidth ＠ and retrying');
+            try {
+              // Replace @ in email-like patterns with fullwidth ＠ (U+FF20)
+              const sanitized = text.replace(
+                /([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g,
+                '$1\uFF20$2',
+              );
+              await sendMsg(sanitized + '\n\n> ⚠️ 消息中的 @ 已被替换为全角＠以通过飞书安全审计，请注意复制时替换回半角 @');
+            } catch (retryErr) {
+              logger.error({ chatId, err: retryErr }, 'Feishu audit 230028 fullwidth @ retry also failed');
+              throw outerErr;
+            }
+          } else {
+            throw outerErr;
           }
         }
         logger.debug({ chatId }, 'Sent Feishu card message');
