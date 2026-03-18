@@ -2060,10 +2060,35 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     sendSystemMessage(chatJid, 'agent_error', errorDetail);
     // Forward agent errors to IM so users aren't left waiting in silence
     if (errorImChannel) {
+      // Build card button for rate-limit errors linking to the usage page
+      const isRateLimit = /limit|rate.?limit|quota|resets/i.test(errorDetail);
+      const webPublicUrl = process.env.WEB_PUBLIC_URL;
+      const sendOpts: IMSendOptions = {};
+      if (isRateLimit && webPublicUrl) {
+        sendOpts.cardExtraElements = [
+          {
+            tag: 'action',
+            actions: [
+              {
+                tag: 'button',
+                text: { tag: 'plain_text', content: '📊 查看用量详情' },
+                type: 'primary',
+                multi_url: {
+                  url: `${webPublicUrl.replace(/\/$/, '')}/usage`,
+                  pc_url: '',
+                  android_url: '',
+                  ios_url: '',
+                },
+              },
+            ],
+          },
+        ];
+      }
       sendImWithFailTracking(
         errorImChannel,
-        `⚠️ Agent 错误：${errorDetail}`,
+        `⚠️ Agent 错误：${errorDetail}${isRateLimit && !webPublicUrl ? '\n\n> 💡 可在 Web 端 /usage 页面查看用量详情' : ''}`,
         [],
+        Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
       );
     }
     logger.warn(

@@ -68,6 +68,8 @@ export interface IMSendOptions {
   urgentUserIds?: string[];
   /** Reply to this specific message ID instead of the last received message (Feishu only). */
   replyToMsgId?: string;
+  /** Extra elements to append to the Feishu interactive card (e.g. action buttons). */
+  cardExtraElements?: Array<Record<string, unknown>>;
 }
 
 export interface IMChannel {
