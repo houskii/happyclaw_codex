@@ -1689,6 +1689,56 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     cursorCommitted = true;
   };
 
+  const finalizeCurrentTurn = (
+    status: 'completed' | 'error' | 'interrupted' | 'drained',
+    options?: { errorDetail?: string },
+  ): void => {
+    const activeTurn = turnManager.getActiveTurn(group.folder);
+    if (!activeTurn) return;
+
+    let traceFile: string | undefined;
+    try {
+      const finalBlocks = streamingBlocksManager.finalize(group.folder);
+      if (finalBlocks.length > 0) {
+        traceFile = saveTurnTrace({
+          turnId: activeTurn.id,
+          chatJid,
+          channel: activeTurn.channel,
+          folder: group.folder,
+          messageIds: activeTurn.messageIds,
+          startedAt: new Date(activeTurn.startedAt).toISOString(),
+          completedAt: new Date().toISOString(),
+          status,
+          blocks: finalBlocks,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, turnId: activeTurn.id }, 'Failed to save turn trace');
+    }
+
+    if (status === 'interrupted') {
+      turnManager.interruptTurn(group.folder);
+    } else if (status === 'error') {
+      turnManager.failTurn(group.folder, options?.errorDetail);
+    } else {
+      turnManager.completeTurn(group.folder, {
+        resultMessageId: lastReplyMsgId,
+        summary: undefined,
+        traceFile,
+      });
+    }
+
+    broadcastTurnEvent(chatJid, {
+      eventType: 'turn_completed',
+      turnId: activeTurn.id,
+      turnStatus: status,
+      turnChannel: activeTurn.channel,
+      turnMessageCount: activeTurn.messageIds.length,
+    });
+    turnObservabilityManager.clear(group.folder);
+    syncPendingTurnObservability(group.folder);
+  };
+
   if (effectiveGroup.created_by) {
     const owner = getUserById(effectiveGroup.created_by);
     if (owner && owner.role !== 'admin') {
@@ -2006,6 +2056,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
         // 流式状态，避免 agent idle 期间持续显示"正在思考..."。
         if (result.status === 'success' && !result.result) {
+          finalizeCurrentTurn('completed');
           broadcastRunnerState(chatJid, 'idle');
         }
 
@@ -2036,66 +2087,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const isErrorExit_ = output.status === 'error' || hadError;
     const isDrained = output.status === 'drained';
     const isInterrupted = wasInterrupted;
-
-    // Save turn trace with finalized streaming blocks
-    let traceFile: string | undefined;
-    try {
-      const finalBlocks = streamingBlocksManager.finalize(group.folder);
-      if (finalBlocks.length > 0) {
-        traceFile = saveTurnTrace({
-          turnId: activeTurn.id,
-          chatJid,
-          channel: activeTurn.channel,
-          folder: group.folder,
-          messageIds: activeTurn.messageIds,
-          startedAt: new Date(activeTurn.startedAt).toISOString(),
-          completedAt: new Date().toISOString(),
-          status: isInterrupted
-            ? 'interrupted'
-            : isErrorExit_
-              ? 'error'
-              : isDrained
-                ? 'drained'
-                : 'completed',
-          blocks: finalBlocks,
-        });
-      }
-    } catch (err) {
-      logger.warn({ err, turnId: activeTurn.id }, 'Failed to save turn trace');
-    }
-
-    if (isInterrupted) {
-      turnManager.interruptTurn(group.folder);
-    } else if (isErrorExit_) {
-      turnManager.failTurn(group.folder, output.error || lastError);
-    } else {
-      turnManager.completeTurn(group.folder, {
-        resultMessageId: lastReplyMsgId,
-        summary: undefined, // Summary is the reply text — already in DB as message
-        traceFile,
-      });
-    }
-
-    // Broadcast turn completion
-    const turnStatus = isInterrupted
-      ? 'interrupted'
-      : isErrorExit_
-        ? 'error'
-        : isDrained
-          ? 'drained'
-          : 'completed';
-    broadcastTurnEvent(chatJid, {
-      eventType: 'turn_completed',
-      turnId: activeTurn.id,
-      turnStatus,
-      turnChannel: activeTurn.channel,
-      turnMessageCount: activeTurn.messageIds.length,
-    });
-    turnObservabilityManager.clear(group.folder);
+    finalizeCurrentTurn(
+      isInterrupted
+        ? 'interrupted'
+        : isErrorExit_
+          ? 'error'
+          : isDrained
+            ? 'drained'
+            : 'completed',
+      { errorDetail: output.error || lastError },
+    );
 
     // Check if there are queued turns to process next
     const nextEntry = turnManager.drainNext(group.folder);
-    syncPendingTurnObservability(group.folder);
     if (nextEntry) {
       logger.info(
         {
