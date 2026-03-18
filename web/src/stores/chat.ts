@@ -37,6 +37,27 @@ export interface StreamingTimelineEvent {
   kind: 'tool' | 'skill' | 'hook' | 'status';
 }
 
+/** Shape of the snapshot payload pushed from the backend on WS reconnect (stream_snapshot). */
+export interface StreamSnapshotData {
+  partialText: string;
+  activeTools: Array<{
+    toolName: string;
+    toolUseId: string;
+    startTime: number;
+    toolInputSummary?: string;
+    parentToolUseId?: string | null;
+  }>;
+  recentEvents: Array<{
+    id: string;
+    timestamp: number;
+    text: string;
+    kind: string;
+  }>;
+  todos?: Array<{ id: string; content: string; status: string }>;
+  systemStatus: string | null;
+  turnId?: string;
+}
+
 export interface StreamingState {
   turnId?: string;
   sessionId?: string;
@@ -172,7 +193,7 @@ interface ChatState {
     options?: { preserveThinking?: boolean },
   ) => void;
   restoreActiveState: () => Promise<void>;
-  handleStreamSnapshot: (chatJid: string, snapshot: any) => void;
+  handleStreamSnapshot: (chatJid: string, snapshot: StreamSnapshotData) => void;
   // Sub-agent actions
   loadAgents: (jid: string) => Promise<void>;
   deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
@@ -2059,14 +2080,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const restored: StreamingState = {
         ...DEFAULT_STREAMING_STATE,
         partialText: snapshot.partialText || '',
-        activeTools: (snapshot.activeTools || []).map((t: any) => ({
+        activeTools: (snapshot.activeTools || []).map((t) => ({
           toolName: t.toolName,
           toolUseId: t.toolUseId,
           startTime: t.startTime,
           toolInputSummary: t.toolInputSummary,
           parentToolUseId: t.parentToolUseId,
         })),
-        recentEvents: snapshot.recentEvents || [],
+        recentEvents: (snapshot.recentEvents || []) as StreamingTimelineEvent[],
         todos: snapshot.todos,
         systemStatus: snapshot.systemStatus || null,
         turnId: snapshot.turnId,

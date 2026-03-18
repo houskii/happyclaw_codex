@@ -1306,8 +1306,18 @@ interface StreamingSnapshotEntry {
 }
 
 const streamingSnapshots = new Map<string, StreamingSnapshotEntry>();
+/** Accumulates full (non-truncated) text per group for shutdown persistence & disk buffer. */
+const streamingFullTexts = new Map<string, string>();
 const MAX_SNAPSHOT_TEXT = 4000;
 const MAX_SNAPSHOT_EVENTS = 20;
+
+/** Push a recent event entry and truncate to MAX_SNAPSHOT_EVENTS. */
+function pushRecentEvent(snap: StreamingSnapshotEntry, event: { id: string; timestamp: number; text: string; kind: 'tool' | 'skill' | 'hook' | 'status' }): void {
+  snap.recentEvents.push(event);
+  if (snap.recentEvents.length > MAX_SNAPSHOT_EVENTS) {
+    snap.recentEvents = snap.recentEvents.slice(-MAX_SNAPSHOT_EVENTS);
+  }
+}
 
 function updateStreamingSnapshot(normalizedJid: string, event: StreamEvent): void {
   let snap = streamingSnapshots.get(normalizedJid);
@@ -1315,6 +1325,7 @@ function updateStreamingSnapshot(normalizedJid: string, event: StreamEvent): voi
   // Reset on new turn
   if (snap?.turnId && event.turnId && snap.turnId !== event.turnId) {
     snap = undefined;
+    streamingFullTexts.delete(normalizedJid);
   }
 
   if (!snap) {
@@ -1338,6 +1349,8 @@ function updateStreamingSnapshot(normalizedJid: string, event: StreamEvent): voi
         if (snap.partialText.length > MAX_SNAPSHOT_TEXT) {
           snap.partialText = snap.partialText.slice(-MAX_SNAPSHOT_TEXT);
         }
+        // Accumulate full (non-truncated) text for shutdown persistence
+        streamingFullTexts.set(normalizedJid, (streamingFullTexts.get(normalizedJid) || '') + event.text);
       }
       break;
 
@@ -1350,15 +1363,12 @@ function updateStreamingSnapshot(normalizedJid: string, event: StreamEvent): voi
           toolInputSummary: event.toolInputSummary,
           parentToolUseId: event.parentToolUseId,
         });
-        snap.recentEvents.push({
+        pushRecentEvent(snap, {
           id: event.toolUseId,
           timestamp: Date.now(),
           text: event.skillName || event.toolName,
           kind: event.skillName ? 'skill' : 'tool',
         });
-        if (snap.recentEvents.length > MAX_SNAPSHOT_EVENTS) {
-          snap.recentEvents = snap.recentEvents.slice(-MAX_SNAPSHOT_EVENTS);
-        }
       }
       break;
 
@@ -1380,29 +1390,23 @@ function updateStreamingSnapshot(normalizedJid: string, event: StreamEvent): voi
     case 'status':
       snap.systemStatus = event.statusText || null;
       if (event.statusText) {
-        snap.recentEvents.push({
+        pushRecentEvent(snap, {
           id: `status-${Date.now()}`,
           timestamp: Date.now(),
           text: event.statusText,
           kind: 'status',
         });
-        if (snap.recentEvents.length > MAX_SNAPSHOT_EVENTS) {
-          snap.recentEvents = snap.recentEvents.slice(-MAX_SNAPSHOT_EVENTS);
-        }
       }
       break;
 
     case 'hook_started':
       if (event.hookName) {
-        snap.recentEvents.push({
+        pushRecentEvent(snap, {
           id: `hook-${Date.now()}`,
           timestamp: Date.now(),
           text: `${event.hookName} (${event.hookEvent || ''})`,
           kind: 'hook',
         });
-        if (snap.recentEvents.length > MAX_SNAPSHOT_EVENTS) {
-          snap.recentEvents = snap.recentEvents.slice(-MAX_SNAPSHOT_EVENTS);
-        }
       }
       break;
 
@@ -1419,16 +1423,17 @@ function updateStreamingSnapshot(normalizedJid: string, event: StreamEvent): voi
 export function clearStreamingSnapshot(chatJid: string): void {
   const jid = normalizeHomeJid(chatJid);
   streamingSnapshots.delete(jid);
+  streamingFullTexts.delete(jid);
 }
 
 /**
- * Return all active streaming snapshots with non-empty partial text.
- * Used during shutdown to persist interrupted responses to DB.
+ * Return all active streaming texts with non-empty content.
+ * Uses the full (non-truncated) text accumulator for shutdown persistence & disk buffer.
  */
 export function getActiveStreamingTexts(): Map<string, string> {
   const result = new Map<string, string>();
-  for (const [jid, snap] of streamingSnapshots) {
-    const text = snap.partialText.trim();
+  for (const [jid, fullText] of streamingFullTexts) {
+    const text = fullText.trim();
     if (text) {
       result.set(jid, text);
     }
@@ -1510,9 +1515,15 @@ export function broadcastRunnerState(
   // Clear streaming snapshots when runner goes idle (main + all agent snapshots)
   if (state === 'idle') {
     streamingSnapshots.delete(jid);
+    streamingFullTexts.delete(jid);
     for (const key of streamingSnapshots.keys()) {
       if (key.startsWith(jid + '#agent:')) {
         streamingSnapshots.delete(key);
+      }
+    }
+    for (const key of streamingFullTexts.keys()) {
+      if (key.startsWith(jid + '#agent:')) {
+        streamingFullTexts.delete(key);
       }
     }
   }
