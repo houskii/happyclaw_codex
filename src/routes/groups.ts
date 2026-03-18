@@ -754,11 +754,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   }
 
   // Update registered group if name, skills, or activation_mode changed
-  if (
-    name ||
-    selected_skills !== undefined ||
-    activation_mode !== undefined
-  ) {
+  if (name || selected_skills !== undefined || activation_mode !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -1019,7 +1015,10 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   // 0. Export transcripts before reset (for memory system), main session only
   if (!agentId && deps.triggerSessionWrapup) {
     await deps.triggerSessionWrapup(group.folder).catch((err) => {
-      logger.warn({ jid, err }, 'Pre-reset transcript export failed (non-blocking)');
+      logger.warn(
+        { jid, err },
+        'Pre-reset transcript export failed (non-blocking)',
+      );
     });
   }
 
@@ -1674,7 +1673,11 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   const selected_mcps = body.selected_mcps;
 
   // Validate mcp_mode
-  if (mcp_mode !== undefined && mcp_mode !== 'inherit' && mcp_mode !== 'custom') {
+  if (
+    mcp_mode !== undefined &&
+    mcp_mode !== 'inherit' &&
+    mcp_mode !== 'custom'
+  ) {
     return c.json({ error: 'Invalid mcp_mode' }, 400);
   }
 
@@ -1694,7 +1697,8 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   const updatedGroup: RegisteredGroup = {
     ...group,
     mcp_mode: mcp_mode ?? group.mcp_mode ?? 'inherit',
-    selected_mcps: selected_mcps !== undefined ? selected_mcps : group.selected_mcps,
+    selected_mcps:
+      selected_mcps !== undefined ? selected_mcps : group.selected_mcps,
   };
 
   setRegisteredGroup(jid, updatedGroup);

@@ -16,7 +16,13 @@ import path from 'path';
 import readline from 'readline';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
-import { getChatNamesByJids, getGroupsByOwner, getTranscriptMessagesSince, getUserHomeGroup, listUsers } from './db.js';
+import {
+  getChatNamesByJids,
+  getGroupsByOwner,
+  getTranscriptMessagesSince,
+  getUserHomeGroup,
+  listUsers,
+} from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import {
@@ -24,7 +30,6 @@ import {
   getClaudeProviderConfig,
   getContainerEnvConfig,
   getSystemSettings,
-
 } from './runtime-config.js';
 import type { MessageCursor } from './types.js';
 
@@ -137,9 +142,7 @@ export function ensureMemoryDir(userId: string): string {
 /**
  * Read the memory state.json for a user.
  */
-export function readMemoryState(
-  userId: string,
-): Record<string, unknown> {
+export function readMemoryState(userId: string): Record<string, unknown> {
   const statePath = path.join(DATA_DIR, 'memory', userId, 'state.json');
   try {
     if (fs.existsSync(statePath)) {
@@ -223,7 +226,9 @@ function formatTranscriptMarkdown(
   const channelSet = new Set<string>();
   for (const msg of messages) {
     const effectiveJid = msg.source_jid || msg.chat_jid;
-    channelSet.add(resolveChannelLabel(effectiveJid, nameMap.get(effectiveJid)));
+    channelSet.add(
+      resolveChannelLabel(effectiveJid, nameMap.get(effectiveJid)),
+    );
   }
   const channels = Array.from(channelSet);
   const isMultiChannel = channels.length > 1;
@@ -248,7 +253,10 @@ function formatTranscriptMarkdown(
     // Only tag per-message channel when transcript spans multiple channels
     if (isMultiChannel && !msg.is_from_me) {
       const effectiveJid = msg.source_jid || msg.chat_jid;
-      const label = resolveChannelLabel(effectiveJid, nameMap.get(effectiveJid));
+      const label = resolveChannelLabel(
+        effectiveJid,
+        nameMap.get(effectiveJid),
+      );
       lines.push(`**${role}** (${time}) [${label}]: ${content}`, '');
     } else {
       lines.push(`**${role}** (${time}): ${content}`, '');
@@ -339,7 +347,7 @@ export async function exportTranscriptsForUser(
 
     // Update cursors per-jid: only update jids that had messages
     for (const jid of chatJids) {
-      const jidMsgs = allMessages.filter(m => m.chat_jid === jid);
+      const jidMsgs = allMessages.filter((m) => m.chat_jid === jid);
       if (jidMsgs.length > 0) {
         const last = jidMsgs[jidMsgs.length - 1];
         wrapups[jid] = { timestamp: last.timestamp, id: last.id };
@@ -561,10 +569,7 @@ export class MemoryAgentManager {
 
     // Process exit → reject all pending queries, clean up
     proc.on('exit', (code, signal) => {
-      logger.info(
-        { userId, code, signal },
-        'Memory Agent process exited',
-      );
+      logger.info({ userId, code, signal }, 'Memory Agent process exited');
 
       const currentEntry = this.agents.get(userId);
       if (currentEntry === entry) {
@@ -606,7 +611,8 @@ export class MemoryAgentManager {
     const stderrStart = entry.stderrBuffer.length;
 
     return new Promise((resolve, reject) => {
-      const queryTimeoutMs = getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
+      const queryTimeoutMs =
+        getSystemSettings().memoryQueryTimeout || DEFAULT_QUERY_TIMEOUT_MS;
       const timeout = setTimeout(() => {
         entry.pendingQueries.delete(requestId);
         const err = new Error('Memory query timeout');
@@ -649,7 +655,11 @@ export class MemoryAgentManager {
         reject(reason);
       };
 
-      entry.pendingQueries.set(requestId, { resolve: wrappedResolve, reject: wrappedReject, timeout });
+      entry.pendingQueries.set(requestId, {
+        resolve: wrappedResolve,
+        reject: wrappedReject,
+        timeout,
+      });
 
       const message = JSON.stringify({
         requestId,
@@ -665,7 +675,9 @@ export class MemoryAgentManager {
         if (err) {
           clearTimeout(timeout);
           entry.pendingQueries.delete(requestId);
-          wrappedReject(new Error(`Failed to write to Memory Agent stdin: ${err.message}`));
+          wrappedReject(
+            new Error(`Failed to write to Memory Agent stdin: ${err.message}`),
+          );
         }
       });
     });
@@ -686,9 +698,10 @@ export class MemoryAgentManager {
     const payload = { ...message, requestId };
 
     const settings = getSystemSettings();
-    const timeoutMs = message.type === 'global_sleep'
-      ? settings.memoryGlobalSleepTimeout
-      : settings.memorySendTimeout;
+    const timeoutMs =
+      message.type === 'global_sleep'
+        ? settings.memoryGlobalSleepTimeout
+        : settings.memorySendTimeout;
 
     const msgType = String(message.type || 'unknown');
     const startTime = Date.now();
@@ -737,7 +750,11 @@ export class MemoryAgentManager {
         reject(reason);
       };
 
-      entry.pendingQueries.set(requestId, { resolve: wrappedResolve, reject: wrappedReject, timeout });
+      entry.pendingQueries.set(requestId, {
+        resolve: wrappedResolve,
+        reject: wrappedReject,
+        timeout,
+      });
 
       entry.proc.stdin!.write(JSON.stringify(payload) + '\n', (err) => {
         if (err) {

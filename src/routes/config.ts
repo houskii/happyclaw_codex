@@ -25,7 +25,6 @@ import {
   FeishuConfigSchema,
   TelegramConfigSchema,
   QQConfigSchema,
-
   RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
@@ -65,7 +64,6 @@ import {
   saveUserTelegramConfig,
   getUserQQConfig,
   saveUserQQConfig,
-
   updateAllSessionCredentials,
   detectLocalClaudeCode,
   importLocalClaudeCredentials,
@@ -74,7 +72,11 @@ import type { ClaudeOAuthCredentials } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import { logger } from '../logger.js';
-import { checkImChannelLimit, isBillingEnabled, clearBillingEnabledCache } from '../billing.js';
+import {
+  checkImChannelLimit,
+  isBillingEnabled,
+  clearBillingEnabledCache,
+} from '../billing.js';
 
 const configRoutes = new Hono<{ Variables: Variables }>();
 
@@ -87,8 +89,10 @@ function countOtherEnabledImChannels(
   excludeChannel: 'feishu' | 'telegram' | 'qq',
 ): number {
   let count = 0;
-  if (excludeChannel !== 'feishu' && getUserFeishuConfig(userId)?.enabled) count++;
-  if (excludeChannel !== 'telegram' && getUserTelegramConfig(userId)?.enabled) count++;
+  if (excludeChannel !== 'feishu' && getUserFeishuConfig(userId)?.enabled)
+    count++;
+  if (excludeChannel !== 'telegram' && getUserTelegramConfig(userId)?.enabled)
+    count++;
   if (excludeChannel !== 'qq' && getUserQQConfig(userId)?.enabled) count++;
   return count;
 }
@@ -984,7 +988,10 @@ function applyBindingUpdate(imJid: string, updated: RegisteredGroup): void {
 }
 
 configRoutes.get('/feishu', authMiddleware, systemConfigMiddleware, (c) => {
-  logDeprecationOnce('GET /api/config/feishu', 'GET /api/config/user-im/feishu');
+  logDeprecationOnce(
+    'GET /api/config/feishu',
+    'GET /api/config/user-im/feishu',
+  );
   try {
     const { config, source } = getFeishuProviderConfigWithSource();
     const pub = toPublicFeishuProviderConfig(config, source);
@@ -1057,7 +1064,10 @@ configRoutes.put(
 // ─── Telegram config ─────────────────────────────────────────────
 
 configRoutes.get('/telegram', authMiddleware, systemConfigMiddleware, (c) => {
-  logDeprecationOnce('GET /api/config/telegram', 'GET /api/config/user-im/telegram');
+  logDeprecationOnce(
+    'GET /api/config/telegram',
+    'GET /api/config/user-im/telegram',
+  );
   try {
     const { config, source } = getTelegramProviderConfigWithSource();
     const pub = toPublicTelegramProviderConfig(config, source);
@@ -1382,7 +1392,11 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
   if (validation.data.enabled === true && isBillingEnabled()) {
     const currentFeishu = getUserFeishuConfig(user.id);
     if (!currentFeishu?.enabled) {
-      const limit = checkImChannelLimit(user.id, user.role, countOtherEnabledImChannels(user.id, 'feishu'));
+      const limit = checkImChannelLimit(
+        user.id,
+        user.role,
+        countOtherEnabledImChannels(user.id, 'feishu'),
+      );
       if (!limit.allowed) {
         return c.json({ error: limit.reason }, 403);
       }
@@ -1492,7 +1506,11 @@ configRoutes.put('/user-im/telegram', authMiddleware, async (c) => {
   if (validation.data.enabled === true && isBillingEnabled()) {
     const currentTg = getUserTelegramConfig(user.id);
     if (!currentTg?.enabled) {
-      const limit = checkImChannelLimit(user.id, user.role, countOtherEnabledImChannels(user.id, 'telegram'));
+      const limit = checkImChannelLimit(
+        user.id,
+        user.role,
+        countOtherEnabledImChannels(user.id, 'telegram'),
+      );
       if (!limit.allowed) {
         return c.json({ error: limit.reason }, 403);
       }
@@ -1717,7 +1735,11 @@ configRoutes.put('/user-im/qq', authMiddleware, async (c) => {
   if (validation.data.enabled === true && isBillingEnabled()) {
     const currentQQ = getUserQQConfig(user.id);
     if (!currentQQ?.enabled) {
-      const limit = checkImChannelLimit(user.id, user.role, countOtherEnabledImChannels(user.id, 'qq'));
+      const limit = checkImChannelLimit(
+        user.id,
+        user.role,
+        countOtherEnabledImChannels(user.id, 'qq'),
+      );
       if (!limit.allowed) {
         return c.json({ error: limit.reason }, 403);
       }
@@ -1957,16 +1979,23 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       return c.json({ error: 'Agent not found' }, 404);
     }
     if (agent.kind !== 'conversation') {
-      return c.json({ error: 'Only conversation agents can bind IM groups' }, 400);
+      return c.json(
+        { error: 'Only conversation agents can bind IM groups' },
+        400,
+      );
     }
     // Check user can access the workspace that owns this agent
     const ownerGroup = getRegisteredGroup(agent.chat_jid);
-    if (!ownerGroup || !canAccessGroup(user, { ...ownerGroup, jid: agent.chat_jid })) {
+    if (
+      !ownerGroup ||
+      !canAccessGroup(user, { ...ownerGroup, jid: agent.chat_jid })
+    ) {
       return c.json({ error: 'Forbidden' }, 403);
     }
 
     const force = body.force === true;
-    const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+    const replyPolicy =
+      body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
     const hasConflict =
       (imGroup.target_agent_id && imGroup.target_agent_id !== agentId) ||
       !!imGroup.target_main_jid;
@@ -1981,7 +2010,10 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       reply_policy: replyPolicy,
     };
     applyBindingUpdate(imJid, updated);
-    logger.info({ imJid, agentId, userId: user.id }, 'IM group bound to agent (bindings page)');
+    logger.info(
+      { imJid, agentId, userId: user.id },
+      'IM group bound to agent (bindings page)',
+    );
     return c.json({ success: true });
   }
 
@@ -1996,11 +2028,15 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       return c.json({ error: 'Forbidden' }, 403);
     }
     if (targetGroup.is_home) {
-      return c.json({ error: 'Home workspace main conversation uses default IM routing' }, 400);
+      return c.json(
+        { error: 'Home workspace main conversation uses default IM routing' },
+        400,
+      );
     }
 
     const force = body.force === true;
-    const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
+    const replyPolicy =
+      body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
     const legacyMainJid = `web:${targetGroup.folder}`;
     const hasConflict =
       !!imGroup.target_agent_id ||
@@ -2018,11 +2054,17 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       reply_policy: replyPolicy,
     };
     applyBindingUpdate(imJid, updated);
-    logger.info({ imJid, targetMainJid, userId: user.id }, 'IM group bound to workspace (bindings page)');
+    logger.info(
+      { imJid, targetMainJid, userId: user.id },
+      'IM group bound to workspace (bindings page)',
+    );
     return c.json({ success: true });
   }
 
-  return c.json({ error: 'Must provide target_main_jid, target_agent_id, or unbind' }, 400);
+  return c.json(
+    { error: 'Must provide target_main_jid, target_agent_id, or unbind' },
+    400,
+  );
 });
 
 // ─── Local Claude Code detection ──────────────────────────────────
