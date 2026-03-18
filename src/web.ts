@@ -1448,10 +1448,10 @@ export function broadcastStreamEvent(
     : { type: 'stream_event', chatJid: jid, event };
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 
-  // Accumulate snapshot for main conversation only (not agent streams)
-  if (!agentId) {
-    updateStreamingSnapshot(jid, event);
-  }
+  // Accumulate snapshot for both main and agent streams.
+  // Agent streams use virtual JID format (jid#agent:agentId) as the key.
+  const snapshotJid = agentId ? `${jid}#agent:${agentId}` : jid;
+  updateStreamingSnapshot(snapshotJid, event);
 }
 
 export function broadcastBillingUpdate(
@@ -1507,9 +1507,14 @@ export function broadcastRunnerState(
   };
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 
-  // Clear streaming snapshot when runner goes idle
+  // Clear streaming snapshots when runner goes idle (main + all agent snapshots)
   if (state === 'idle') {
     streamingSnapshots.delete(jid);
+    for (const key of streamingSnapshots.keys()) {
+      if (key.startsWith(jid + '#agent:')) {
+        streamingSnapshots.delete(key);
+      }
+    }
   }
 }
 
