@@ -559,6 +559,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingBuffer: {},
 
   handleRunnerState: (chatJid, state, detail) => {
+    if (state === 'idle') {
+      // Agent 进程退出或 query 无可见输出：清除流式状态，
+      // 停止显示"正在思考..."。如果后续有新消息触发新 query，
+      // stream events 会自然重新设置 waiting。
+      get().clearStreaming(chatJid, { preserveThinking: true });
+      return;
+    }
     set((s) => ({
       runnerState: { ...s.runnerState, [chatJid]: { state, detail } },
     }));

@@ -1958,6 +1958,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingBlocksManager.finalize(group.folder);
         }
 
+        // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
+        // 流式状态，避免 agent idle 期间持续显示"正在思考..."。
+        if (result.status === 'success' && !result.result) {
+          broadcastRunnerState(chatJid, 'idle');
+        }
+
         if (result.status === 'error') {
           hadError = true;
           if (result.error) lastError = result.error;
@@ -1973,6 +1979,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await setTyping(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
   clearIpcDeliveryTracker(chatJid);
+
+  // Agent 进程已退出：通知前端清除流式状态（"正在思考..."）。
+  // 正常有回复时前端已通过 new_message/agent_reply 清理，这里作为兜底确保
+  // 无可见回复（result 为 null）或异常退出时 streaming 状态也能被清除。
+  broadcastRunnerState(chatJid, 'idle');
 
   // --- Turn lifecycle: complete/fail turn and save trace ---
   const activeTurn = turnManager.getActiveTurn(group.folder);
