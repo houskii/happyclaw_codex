@@ -196,6 +196,7 @@ export function resolveChannelLabel(jid: string, name?: string): string {
 // --- Transcript export ---
 
 interface TranscriptMessage {
+  rowid: number;
   id: string;
   chat_jid: string;
   source_jid?: string;
@@ -279,14 +280,23 @@ export async function exportTranscriptsForUser(
   try {
     const memDir = ensureMemoryDir(userId);
     const state = readMemoryState(userId);
-    const wrapups = (state.lastSessionWrapups || {}) as Record<
+    const rawWrapups = (state.lastSessionWrapups || {}) as Record<
       string,
-      MessageCursor
+      unknown
     >;
-    const defaultCursor: MessageCursor = {
-      timestamp: '1970-01-01T00:00:00Z',
-      id: '',
-    };
+    // Normalize wrapup cursors: handle both old { timestamp, id } and new { rowid } format
+    const wrapups: Record<string, MessageCursor> = {};
+    for (const [jid, raw] of Object.entries(rawWrapups)) {
+      if (raw && typeof raw === 'object' && typeof (raw as { rowid?: unknown }).rowid === 'number') {
+        wrapups[jid] = { rowid: (raw as { rowid: number }).rowid };
+      } else if (raw && typeof raw === 'object' && typeof (raw as { timestamp?: unknown }).timestamp === 'string') {
+        // Old format: reset to 0 (transcript export is idempotent)
+        wrapups[jid] = { rowid: 0 };
+      } else {
+        wrapups[jid] = { rowid: 0 };
+      }
+    }
+    const defaultCursor: MessageCursor = { rowid: 0 };
 
     // Collect all messages from all associated chatJids
     const allMessages: TranscriptMessage[] = [];
@@ -295,6 +305,7 @@ export async function exportTranscriptsForUser(
       const msgs = getTranscriptMessagesSince(jid, cursor);
       allMessages.push(
         ...msgs.map((m) => ({
+          rowid: m.rowid,
           id: m.id,
           chat_jid: m.chat_jid,
           source_jid: m.source_jid,
@@ -311,11 +322,8 @@ export async function exportTranscriptsForUser(
       return null;
     }
 
-    // Sort by time, then by id for stable ordering
-    allMessages.sort(
-      (a, b) =>
-        a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id),
-    );
+    // Sort by insertion order (rowid) for stable ordering
+    allMessages.sort((a, b) => a.rowid - b.rowid);
 
     // Resolve channel names for all effective JIDs
     const effectiveJids = new Set<string>();
@@ -350,7 +358,7 @@ export async function exportTranscriptsForUser(
       const jidMsgs = allMessages.filter((m) => m.chat_jid === jid);
       if (jidMsgs.length > 0) {
         const last = jidMsgs[jidMsgs.length - 1];
-        wrapups[jid] = { timestamp: last.timestamp, id: last.id };
+        wrapups[jid] = { rowid: last.rowid };
       }
     }
     state.lastSessionWrapups = wrapups;

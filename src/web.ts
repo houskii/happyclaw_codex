@@ -266,7 +266,7 @@ async function handleWebUserMessage(
     normalizedAttachments.length > 0
       ? JSON.stringify(normalizedAttachments)
       : undefined;
-  storeMessageDirect(
+  const msgRowid = storeMessageDirect(
     messageId,
     chatJid,
     userId,
@@ -314,8 +314,8 @@ async function handleWebUserMessage(
           timestamp: sysTimestamp,
           is_from_me: true,
         });
-        deps.setLastAgentTimestamp(chatJid, { timestamp, id: messageId });
-        deps.advanceGlobalCursor({ timestamp, id: messageId });
+        deps.setLastAgentTimestamp(chatJid, { rowid: msgRowid });
+        deps.advanceGlobalCursor({ rowid: msgRowid });
         return { ok: true, messageId, timestamp };
       }
     }
@@ -367,9 +367,9 @@ async function handleWebUserMessage(
   // Only advance per-group cursor when we piped directly into a running container.
   // For queued processing, processGroupMessages must still see this message from DB.
   if (pipedToActive) {
-    deps.setLastAgentTimestamp(chatJid, { timestamp, id: messageId });
+    deps.setLastAgentTimestamp(chatJid, { rowid: msgRowid });
   }
-  deps.advanceGlobalCursor({ timestamp, id: messageId });
+  deps.advanceGlobalCursor({ rowid: msgRowid });
   return { ok: true, messageId, timestamp };
 }
 

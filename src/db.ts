@@ -25,6 +25,7 @@ import {
   InviteCodeWithCreator,
   MonthlyUsage,
   NewMessage,
+  DbMessage,
   MessageCursor,
   RedeemCode,
   RegisteredGroup,
@@ -1214,8 +1215,8 @@ export function storeMessageDirect(
   attachments?: string,
   tokenUsage?: string,
   sourceJid?: string,
-): void {
-  db.prepare(
+): number {
+  const result = db.prepare(
     `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msgId,
@@ -1229,6 +1230,7 @@ export function storeMessageDirect(
     attachments ?? null,
     tokenUsage ?? null,
   );
+  return Number(result.lastInsertRowid);
 }
 
 /**
@@ -1714,58 +1716,54 @@ export function getUsageUsers(): Array<{ id: string; username: string }> {
 export function getNewMessages(
   jids: string[],
   cursor: MessageCursor,
-): { messages: NewMessage[]; newCursor: MessageCursor } {
+): { messages: DbMessage[]; newCursor: MessageCursor } {
   if (jids.length === 0) return { messages: [], newCursor: cursor };
 
   const placeholders = jids.map(() => '?').join(',');
   // Filter out assistant outputs.
   const sql = `
-    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
     FROM messages
     WHERE
-      (timestamp > ? OR (timestamp = ? AND id > ?))
+      rowid > ?
       AND chat_jid IN (${placeholders})
       AND is_from_me = 0
-    ORDER BY timestamp ASC, id ASC
+    ORDER BY rowid ASC
   `;
 
   const rows = db
     .prepare(sql)
     .all(
-      cursor.timestamp,
-      cursor.timestamp,
-      cursor.id,
+      cursor.rowid,
       ...jids,
-    ) as NewMessage[];
+    ) as DbMessage[];
   const last = rows[rows.length - 1];
   return {
     messages: rows,
-    newCursor: last ? { timestamp: last.timestamp, id: last.id } : cursor,
+    newCursor: last ? { rowid: last.rowid } : cursor,
   };
 }
 
 export function getMessagesSince(
   chatJid: string,
   cursor: MessageCursor,
-): NewMessage[] {
+): DbMessage[] {
   // Filter out assistant outputs.
   const sql = `
-    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
     FROM messages
     WHERE
       chat_jid = ?
-      AND (timestamp > ? OR (timestamp = ? AND id > ?))
+      AND rowid > ?
       AND is_from_me = 0
-    ORDER BY timestamp ASC, id ASC
+    ORDER BY rowid ASC
   `;
   return db
     .prepare(sql)
     .all(
       chatJid,
-      cursor.timestamp,
-      cursor.timestamp,
-      cursor.id,
-    ) as NewMessage[];
+      cursor.rowid,
+    ) as DbMessage[];
 }
 
 /**
@@ -1775,20 +1773,37 @@ export function getMessagesSince(
 export function getTranscriptMessagesSince(
   chatJid: string,
   cursor: MessageCursor,
-): Array<NewMessage & { is_from_me: boolean }> {
+): Array<DbMessage & { is_from_me: boolean }> {
   const sql = `
-    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, is_from_me
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, is_from_me
     FROM messages
     WHERE
       chat_jid = ?
-      AND (timestamp > ? OR (timestamp = ? AND id > ?))
-    ORDER BY timestamp ASC, id ASC
+      AND rowid > ?
+    ORDER BY rowid ASC
   `;
   return db
     .prepare(sql)
-    .all(chatJid, cursor.timestamp, cursor.timestamp, cursor.id) as Array<
-    NewMessage & { is_from_me: boolean }
+    .all(chatJid, cursor.rowid) as Array<
+    DbMessage & { is_from_me: boolean }
   >;
+}
+
+/**
+ * Migration helper: look up the rowid of a message by its old-format
+ * (timestamp, id) cursor. Falls back to MAX(rowid) at or before that
+ * timestamp, or 0 if the table is empty / timestamp predates all rows.
+ */
+export function getRowidByCursor(timestamp: string, id: string): number {
+  if (!timestamp) return 0;
+  const exact = db
+    .prepare('SELECT rowid FROM messages WHERE id = ? AND timestamp = ?')
+    .get(id, timestamp) as { rowid: number } | undefined;
+  if (exact) return exact.rowid;
+  const fallback = db
+    .prepare('SELECT MAX(rowid) as rowid FROM messages WHERE timestamp <= ?')
+    .get(timestamp) as { rowid: number | null } | undefined;
+  return fallback?.rowid ?? 0;
 }
 
 export function createTask(

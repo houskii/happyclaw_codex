@@ -894,7 +894,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
 
   delete deps.getRegisteredGroups()[jid];
   delete deps.getSessions()[existing.folder];
-  deps.setLastAgentTimestamp(jid, { timestamp: '', id: '' });
+  deps.setLastAgentTimestamp(jid, { rowid: 0 });
 
   return c.json({ success: true });
 });
@@ -1084,9 +1084,10 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   const targetJid = agentId ? `${jid}#agent:${agentId}` : jid;
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
+  let dividerRowid = 0;
   try {
     ensureChatExists(targetJid);
-    storeMessageDirect(
+    dividerRowid = storeMessageDirect(
       dividerMessageId,
       targetJid,
       '__system__',
@@ -1116,15 +1117,12 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   //    re-sent to the next fresh agent session.
   if (agentId) {
     const virtualJid = `${jid}#agent:${agentId}`;
-    deps.setLastAgentTimestamp(virtualJid, { timestamp, id: dividerMessageId });
+    deps.setLastAgentTimestamp(virtualJid, { rowid: dividerRowid });
   } else {
     // Main session: advance cursor for ALL sibling JIDs sharing this folder.
     const siblingJids = getJidsByFolder(group.folder);
     for (const siblingJid of siblingJids) {
-      deps.setLastAgentTimestamp(siblingJid, {
-        timestamp,
-        id: dividerMessageId,
-      });
+      deps.setLastAgentTimestamp(siblingJid, { rowid: dividerRowid });
     }
   }
 
@@ -1198,7 +1196,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       deleteChatHistory(siblingJid);
       // Re-create the chats row so subsequent messages work properly
       ensureChatExists(siblingJid);
-      deps.setLastAgentTimestamp(siblingJid, { timestamp: '', id: '' });
+      deps.setLastAgentTimestamp(siblingJid, { rowid: 0 });
     }
   } catch (err) {
     logger.error(

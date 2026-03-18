@@ -45,6 +45,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  getRowidByCursor,
   getTaskById,
   getHomeGroupByFolder,
   getUserHomeGroup,
@@ -125,6 +126,7 @@ import {
 } from './billing.js';
 import {
   AgentStatus,
+  DbMessage,
   MessageCursor,
   NewMessage,
   RegisteredGroup,
@@ -158,7 +160,7 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_MAIN_JID = 'web:main';
 const DEFAULT_MAIN_NAME = 'Main';
 
-let globalMessageCursor: MessageCursor = { timestamp: '', id: '' };
+let globalMessageCursor: MessageCursor = { rowid: 0 };
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, MessageCursor> = {};
@@ -168,7 +170,7 @@ let shuttingDown = false;
 
 const queue = new GroupQueue();
 const turnManager = new TurnManager();
-const EMPTY_CURSOR: MessageCursor = { timestamp: '', id: '' };
+const EMPTY_CURSOR: MessageCursor = { rowid: 0 };
 const terminalWarmupInFlight = new Set<string>();
 
 // IPC delivery watchdog: track piped messages awaiting agent acknowledgement.
@@ -500,25 +502,33 @@ function sendImWithFailTracking(
 }
 
 function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
-  if (candidate.timestamp > base.timestamp) return true;
-  if (candidate.timestamp < base.timestamp) return false;
-  return candidate.id > base.id;
+  return candidate.rowid > base.rowid;
 }
 
 function normalizeCursor(value: unknown): MessageCursor {
-  if (typeof value === 'string') {
-    return { timestamp: value, id: '' };
+  // New format: { rowid: number }
+  if (
+    value &&
+    typeof value === 'object' &&
+    typeof (value as { rowid?: unknown }).rowid === 'number'
+  ) {
+    return { rowid: (value as { rowid: number }).rowid };
   }
+  // Old format migration: { timestamp, id } → look up rowid
   if (
     value &&
     typeof value === 'object' &&
     typeof (value as { timestamp?: unknown }).timestamp === 'string'
   ) {
-    const maybeId = (value as { id?: unknown }).id;
-    return {
-      timestamp: (value as { timestamp: string }).timestamp,
-      id: typeof maybeId === 'string' ? maybeId : '',
-    };
+    const ts = (value as { timestamp: string }).timestamp;
+    const id =
+      typeof (value as { id?: unknown }).id === 'string'
+        ? (value as { id: string }).id
+        : '';
+    return { rowid: getRowidByCursor(ts, id) };
+  }
+  if (typeof value === 'string') {
+    return { rowid: getRowidByCursor(value, '') };
   }
   return { ...EMPTY_CURSOR };
 }
@@ -1218,13 +1228,18 @@ function migrateSystemIMToPerUser(): void {
 }
 
 function loadState(): void {
-  // Load from SQLite
-  const persistedTimestamp = getRouterState('last_timestamp') || '';
-  const lastTimestampId = getRouterState('last_timestamp_id') || '';
-  globalMessageCursor = {
-    timestamp: persistedTimestamp,
-    id: lastTimestampId,
-  };
+  // Load from SQLite — try new rowid format first, fall back to old format
+  const persistedRowid = getRouterState('last_cursor_rowid');
+  if (persistedRowid) {
+    globalMessageCursor = { rowid: Number(persistedRowid) || 0 };
+  } else {
+    // Migrate from old (timestamp, id) format
+    const persistedTimestamp = getRouterState('last_timestamp') || '';
+    const lastTimestampId = getRouterState('last_timestamp_id') || '';
+    globalMessageCursor = {
+      rowid: getRowidByCursor(persistedTimestamp, lastTimestampId),
+    };
+  }
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     const parsed = agentTs
@@ -1384,8 +1399,7 @@ function loadState(): void {
 }
 
 function saveState(): void {
-  setRouterState('last_timestamp', globalMessageCursor.timestamp);
-  setRouterState('last_timestamp_id', globalMessageCursor.id);
+  setRouterState('last_cursor_rowid', String(globalMessageCursor.rowid));
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
@@ -1634,19 +1648,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Only advance, never regress — the message loop may have already
     // advanced the cursor via IPC injection while the agent was running.
     const current = lastAgentTimestamp[chatJid];
-    if (
-      current &&
-      (lastProcessed.timestamp < current.timestamp ||
-        (lastProcessed.timestamp === current.timestamp &&
-          lastProcessed.id <= current.id))
-    ) {
+    if (current && lastProcessed.rowid <= current.rowid) {
       cursorCommitted = true;
       return;
     }
-    lastAgentTimestamp[chatJid] = {
-      timestamp: lastProcessed.timestamp,
-      id: lastProcessed.id,
-    };
+    lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
     saveState();
     cursorCommitted = true;
   };
@@ -3224,10 +3230,7 @@ async function processAgentConversation(
   const lastProcessed = missedMessages[missedMessages.length - 1];
   const commitCursor = (): void => {
     if (cursorCommitted) return;
-    lastAgentTimestamp[virtualChatJid] = {
-      timestamp: lastProcessed.timestamp,
-      id: lastProcessed.id,
-    };
+    lastAgentTimestamp[virtualChatJid] = { rowid: lastProcessed.rowid };
     saveState();
     cursorCommitted = true;
   };
@@ -3469,7 +3472,7 @@ async function startMessageLoop(): Promise<void> {
         saveState();
 
         // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
+        const messagesByGroup = new Map<string, DbMessage[]>();
         for (const msg of messages) {
           const existing = messagesByGroup.get(msg.chat_jid);
           if (existing) {
@@ -3533,10 +3536,7 @@ async function startMessageLoop(): Promise<void> {
 
                 // Advance cursor past these messages so they aren't re-processed
                 const lastMsg = groupMessages[groupMessages.length - 1];
-                lastAgentTimestamp[chatJid] = {
-                  timestamp: lastMsg.timestamp,
-                  id: lastMsg.id,
-                };
+                lastAgentTimestamp[chatJid] = { rowid: lastMsg.rowid };
                 saveState();
                 continue;
               }
@@ -3610,25 +3610,16 @@ async function startMessageLoop(): Promise<void> {
               );
               trackIpcDelivery(chatJid);
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = {
-                timestamp: lastProcessed.timestamp,
-                id: lastProcessed.id,
-              };
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = {
-                timestamp: lastProcessed.timestamp,
-                id: lastProcessed.id,
-              };
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
               turnManager.interruptTurn(folder);
             } else if (sendResult === 'interrupted_correction') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = {
-                timestamp: lastProcessed.timestamp,
-                id: lastProcessed.id,
-              };
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
             } else {
               // no_active — shouldn't happen if TurnManager thinks there's an active turn,
@@ -3666,25 +3657,16 @@ async function startMessageLoop(): Promise<void> {
               );
               trackIpcDelivery(chatJid);
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = {
-                timestamp: lastProcessed.timestamp,
-                id: lastProcessed.id,
-              };
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
             } else if (sendResult === 'interrupted_stop') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = {
-                timestamp: lastProcessed.timestamp,
-                id: lastProcessed.id,
-              };
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
               turnManager.interruptTurn(folder);
             } else if (sendResult === 'interrupted_correction') {
               const lastProcessed = messagesToSend[messagesToSend.length - 1];
-              lastAgentTimestamp[chatJid] = {
-                timestamp: lastProcessed.timestamp,
-                id: lastProcessed.id,
-              };
+              lastAgentTimestamp[chatJid] = { rowid: lastProcessed.rowid };
               saveState();
             } else {
               // no_active — truly no agent running, start a new one
