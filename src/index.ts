@@ -3543,13 +3543,13 @@ async function startMessageLoop(): Promise<void> {
             }
           }
 
-          // Pull all messages since lastAgentTimestamp to preserve full context.
-          const allPending = getMessagesSince(
-            chatJid,
-            lastAgentTimestamp[chatJid] || EMPTY_CURSOR,
-          );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          // Use only the new messages from this poll cycle.
+          // processGroupMessages() handles the initial full fetch from
+          // lastAgentTimestamp when the agent starts.  Subsequent inject/IPC
+          // paths must NOT re-fetch from lastAgentTimestamp because it may
+          // still point to before processGroupMessages' batch, which would
+          // cause duplicate delivery of already-sent messages.
+          const messagesToSend = groupMessages;
 
           // --- Turn-based routing ---
           const channel = resolveChannel(messagesToSend);
