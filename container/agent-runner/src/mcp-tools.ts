@@ -72,6 +72,12 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .describe(
             'Send as urgent/加急 message (Feishu only). The recipient will receive a push notification with buzzing. Use sparingly — only for time-sensitive interactions like QR code scanning, verification codes, or authorization confirmations.',
           ),
+        reply_to_message_id: z
+          .string()
+          .optional()
+          .describe(
+            'Reply to a specific message by its ID (from the message id attribute). When set, the reply will thread to that specific message instead of the default auto-detected trigger message. Only effective when reply threading mode is set to "agent" in system settings.',
+          ),
       },
       async (args) => {
         const data = {
@@ -80,6 +86,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           text: args.text,
           targetChannel: args.channel,
           urgent: args.urgent || false,
+          replyToMsgId: args.reply_to_message_id,
           groupFolder: ctx.groupFolder,
           timestamp: new Date().toISOString(),
         };
