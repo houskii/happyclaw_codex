@@ -566,9 +566,10 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
       }
       if (shouldDrain()) {
         log('Drain sentinel received while idle, exiting for turn boundary');
-        writeOutput({ status: 'drained', result: null, newSessionId: undefined });
-        resolve(null);
-        return;
+        writeOutput({ status: 'drained', result: null });
+        // Must self-exit: unlike _close (host sends SIGTERM), _drain expects
+        // the process to terminate. SDK/MCP resources keep the event loop alive.
+        process.exit(0);
       }
       if (shouldInterrupt()) {
         log('Interrupt sentinel received while idle, ignoring');
@@ -1413,11 +1414,12 @@ async function main(): Promise<void> {
       }
 
       // Check for _drain sentinel: finish current query then exit for turn boundary.
-      // Unlike _close, _drain waits for the query to complete naturally.
+      // Unlike _close (where the host sends SIGTERM), _drain requires self-exit
+      // because the host is waiting for the process to terminate naturally.
       if (shouldDrain()) {
         log('Drain sentinel detected, exiting for turn boundary');
         writeOutput({ status: 'drained', result: null, newSessionId: sessionId });
-        break;
+        process.exit(0);
       }
 
       // Emit session update so host can track it
