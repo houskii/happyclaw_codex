@@ -170,6 +170,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
   const [billingMinStartBalanceUsd, setBillingMinStartBalanceUsd] = useState(0.01);
   const [billingCurrency, setBillingCurrency] = useState('USD');
   const [billingCurrencyRate, setBillingCurrencyRate] = useState(1);
+  const [webPublicUrl, setWebPublicUrl] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -194,6 +195,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
         setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
         setBillingCurrency(data.billingCurrency ?? 'USD');
         setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
+        setWebPublicUrl(data.webPublicUrl ?? '');
       } catch (err) {
         setError(getErrorMessage(err, '加载系统参数失败'));
       } finally {
@@ -240,6 +242,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
         billingMinStartBalanceUsd,
         billingCurrency,
         billingCurrencyRate,
+        webPublicUrl,
       };
       for (const f of fields) {
         const val = displayValues[f.key];
@@ -258,6 +261,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
       setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
       setBillingCurrency(data.billingCurrency ?? 'USD');
       setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
+      setWebPublicUrl(data.webPublicUrl ?? '');
       // 刷新计费状态，更新导航栏可见性
       loadBillingStatus();
       setNotice('系统参数已保存，新参数将对后续启动的容器/进程生效');
@@ -434,6 +438,24 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
             </div>
           </>
         )}
+      </div>
+
+      {/* Web 设置 */}
+      <div className="border-t border-border pt-6 space-y-5">
+        <h3 className="text-sm font-semibold text-foreground">Web 设置</h3>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">公开访问地址</label>
+          <Input
+            type="text"
+            value={webPublicUrl}
+            onChange={(e) => setWebPublicUrl(e.target.value)}
+            placeholder="https://your-domain.com"
+            className="max-w-md"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            用于飞书卡片按钮跳转等场景。留空则不生成跳转链接。
+          </p>
+        </div>
       </div>
 
       <div>
