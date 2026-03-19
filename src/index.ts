@@ -81,6 +81,7 @@ import {
   getTranscriptMessagesSince,
   markStaleTurnsAsError,
   cleanupOldTurns,
+  getMessageById,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
@@ -1165,6 +1166,8 @@ interface SendMessageOptions {
   sendToIM?: boolean;
   /** Pre-computed local image paths to attach to IM messages. Avoids redundant filesystem scans. */
   localImagePaths?: string[];
+  /** External message ID from IM platform (e.g. Feishu om_xxx). Used as DB message ID for reply matching. */
+  externalMsgId?: string;
 }
 
 /**
@@ -1503,7 +1506,22 @@ function formatMessages(messages: NewMessage[], isShared = false, feishuAgentRep
     // so the agent can specify which message to reply to via send_message(reply_to_message_id=...)
     const isFeishuMsg = channelType === 'feishu';
     const idAttr = feishuAgentReply && isFeishuMsg ? ` id="${escapeXml(m.id)}"` : '';
-    return `<message sender="${escapeXml(m.sender_name)}"${sourceAttr}${idAttr} time="${m.timestamp}">${escapeXml(content)}</message>`;
+
+    // Build reply-to attributes if the message is replying to another message.
+    // Uses lightweight attribute references instead of embedding full content —
+    // the original message is likely already in the agent's conversation context.
+    let replyAttrs = '';
+    if (m.reply_to_id) {
+      const original = getMessageById(m.reply_to_id, m.chat_jid);
+      if (original) {
+        const preview = original.content.length > 30
+          ? original.content.slice(0, 30) + '...'
+          : original.content;
+        replyAttrs = ` reply-to="${escapeXml(m.reply_to_id)}" reply-to-sender="${escapeXml(original.sender_name)}" reply-to-preview="${escapeXml(preview)}"`;
+      }
+    }
+
+    return `<message sender="${escapeXml(m.sender_name)}"${sourceAttr}${idAttr}${replyAttrs} time="${m.timestamp}">${escapeXml(content)}</message>`;
   });
   return `<messages>\n${lines.join('\n')}\n</messages>`;
 }
@@ -2650,19 +2668,21 @@ async function sendMessage(
   const isIMChannel = getChannelType(jid) !== null;
   const sendToIM = options.sendToIM ?? isIMChannel;
   try {
+    let externalMsgId: string | undefined;
     if (sendToIM && isIMChannel) {
       try {
         const localImagePaths =
           options.localImagePaths ??
           extractLocalImImagePaths(text, resolveEffectiveFolder(jid));
-        await imManager.sendMessage(jid, text, localImagePaths);
+        externalMsgId = await imManager.sendMessage(jid, text, localImagePaths);
       } catch (err) {
         logger.error({ jid, err }, 'Failed to send message to IM channel');
       }
     }
 
     // Persist assistant reply so Web polling can render it and clear waiting state.
-    const msgId = crypto.randomUUID();
+    // Prefer the IM-returned message ID (e.g. Feishu om_xxx) so inbound reply_to references can match.
+    const msgId = options.externalMsgId || externalMsgId || crypto.randomUUID();
     const timestamp = new Date().toISOString();
     ensureChatExists(jid);
     storeMessageDirect(
@@ -2827,19 +2847,42 @@ function startIpcWatcher(): void {
                         sendOptions.urgent = true;
                         sendOptions.urgentUserIds = [lastInbound.sender];
                       }
-                      sendImWithFailTracking(
-                        data.targetChannel,
-                        data.text,
-                        localImagePaths,
-                        Object.keys(sendOptions).length > 0
-                          ? sendOptions
-                          : undefined,
-                      );
+                      // Await IM send to capture external message ID (e.g. Feishu om_xxx)
+                      // so DB stores the platform ID for reply-to matching.
+                      let imMsgId: string | undefined;
+                      try {
+                        imMsgId = await imManager.sendMessage(
+                          data.targetChannel,
+                          data.text,
+                          localImagePaths,
+                          Object.keys(sendOptions).length > 0
+                            ? sendOptions
+                            : undefined,
+                        );
+                        imSendFailCounts.delete(data.targetChannel);
+                      } catch (err) {
+                        logger.warn({ imJid: data.targetChannel, err }, 'Failed to relay message to IM');
+                        const count = (imSendFailCounts.get(data.targetChannel) ?? 0) + 1;
+                        imSendFailCounts.set(data.targetChannel, count);
+                        if (count >= IM_SEND_FAIL_THRESHOLD) {
+                          try {
+                            unbindImGroup(data.targetChannel, 'Auto-unbound IM group after consecutive send failures');
+                          } catch (unbindErr) {
+                            logger.error({ imJid: data.targetChannel, unbindErr }, 'Failed to auto-unbind IM group');
+                          }
+                        }
+                      }
+                      // 存 DB + 广播 Web（不发 IM），用 IM 平台返回的消息 ID
+                      await sendMessage(data.chatJid, data.text, {
+                        sendToIM: false,
+                        externalMsgId: imMsgId,
+                      });
+                    } else {
+                      // No IM target — just store in DB + broadcast Web
+                      await sendMessage(data.chatJid, data.text, {
+                        sendToIM: false,
+                      });
                     }
-                    // 始终存 DB + 广播 Web（不发 IM）
-                    await sendMessage(data.chatJid, data.text, {
-                      sendToIM: false,
-                    });
                     logger.info(
                       {
                         chatJid: data.chatJid,

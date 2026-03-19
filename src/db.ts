@@ -124,6 +124,7 @@ export function initDatabase(): void {
       is_from_me INTEGER,
       attachments TEXT,
       token_usage TEXT,
+      reply_to_id TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -869,6 +870,7 @@ export function initDatabase(): void {
 
   // v25→v26 migration: cost_usd on messages + idempotency key for balance transactions
   ensureColumn('messages', 'cost_usd', 'REAL');
+  ensureColumn('messages', 'reply_to_id', 'TEXT');
 
   // idempotency key for balance transactions
   ensureColumn('balance_transactions', 'idempotency_key', 'TEXT');
@@ -1250,9 +1252,10 @@ export function storeMessageDirect(
   attachments?: string,
   tokenUsage?: string,
   sourceJid?: string,
+  replyToId?: string,
 ): number {
   const result = db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msgId,
     chatJid,
@@ -1264,8 +1267,27 @@ export function storeMessageDirect(
     isFromMe ? 1 : 0,
     attachments ?? null,
     tokenUsage ?? null,
+    replyToId ?? null,
   );
   return Number(result.lastInsertRowid);
+}
+
+/**
+ * Retrieve a single message by its ID and chat JID.
+ * Used to fetch the original message when a user replies to it.
+ */
+export function getMessageById(
+  msgId: string,
+  chatJid: string,
+): DbMessage | null {
+  return (
+    (db
+      .prepare(
+        `SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id
+         FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1`,
+      )
+      .get(msgId, chatJid) as DbMessage | undefined) ?? null
+  );
 }
 
 /**
@@ -1776,7 +1798,7 @@ export function getNewMessages(
   const placeholders = jids.map(() => '?').join(',');
   // Filter out assistant outputs.
   const sql = `
-    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id
     FROM messages
     WHERE
       rowid > ?
@@ -1804,7 +1826,7 @@ export function getMessagesSince(
 ): DbMessage[] {
   // Filter out assistant outputs.
   const sql = `
-    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
+    SELECT rowid, id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, reply_to_id
     FROM messages
     WHERE
       chat_jid = ?

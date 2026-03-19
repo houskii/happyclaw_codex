@@ -84,7 +84,7 @@ export interface FeishuConnection {
     text: string,
     localImagePaths?: string[],
     options?: FeishuSendOptions,
-  ): Promise<void>;
+  ): Promise<string | undefined>;
   sendImage(
     chatId: string,
     imageBuffer: Buffer,
@@ -131,6 +131,7 @@ interface IncomingMessagePayload {
   mentions?: FeishuMentionLike[];
   senderOpenId?: string;
   senderName?: string;
+  parentId?: string;
 }
 
 interface WsConnectionState {
@@ -823,6 +824,7 @@ export function createFeishuConnection(
       chatType,
       senderOpenId = '',
       senderName,
+      parentId,
     } = payload;
     if (!chatId || !messageId) return;
 
@@ -1099,6 +1101,7 @@ export function createFeishuConnection(
       attachmentsJson,
       undefined,
       chatJid,
+      parentId,
     );
     broadcastNewMessage(
       targetJid,
@@ -1403,6 +1406,7 @@ export function createFeishuConnection(
         'im.message.receive_v1': async (data) => {
           try {
             const message = data.message;
+            const rawMsg = message as Record<string, unknown>;
             await handleIncomingMessage(
               {
                 chatId: message.chat_id,
@@ -1413,6 +1417,7 @@ export function createFeishuConnection(
                 chatType: message.chat_type,
                 mentions: message.mentions as FeishuMentionLike[] | undefined,
                 senderOpenId: data.sender.sender_id?.open_id || '',
+                parentId: rawMsg.parent_id as string | undefined,
               },
               'ws',
             );
@@ -1515,7 +1520,7 @@ export function createFeishuConnection(
       text: string,
       localImagePaths?: string[],
       options?: FeishuSendOptions,
-    ): Promise<void> {
+    ): Promise<string | undefined> {
       if (!client) {
         logger.warn(
           { chatId },
@@ -1679,9 +1684,11 @@ export function createFeishuConnection(
             );
           }
         }
+        return sentMsgId;
       } catch (err) {
         logger.error({ err, chatId }, 'Failed to send Feishu card message');
         clearAckReaction();
+        return undefined;
       }
     },
 
@@ -1973,7 +1980,7 @@ export async function sendFeishuMessage(
   chatId: string,
   text: string,
   localImagePaths?: string[],
-): Promise<void> {
+): Promise<string | undefined> {
   if (!_defaultInstance) {
     logger.warn(
       { chatId },

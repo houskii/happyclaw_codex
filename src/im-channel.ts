@@ -78,7 +78,7 @@ export interface IMChannel {
     text: string,
     localImagePaths?: string[],
     options?: IMSendOptions,
-  ): Promise<void>;
+  ): Promise<string | undefined>;
   /** Send file to chat (if supported) */
   sendFile?(chatId: string, filePath: string, fileName: string): Promise<void>;
   sendImage?(
@@ -172,15 +172,15 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       text: string,
       localImagePaths?: string[],
       options?: IMSendOptions,
-    ): Promise<void> {
+    ): Promise<string | undefined> {
       if (!inner) {
         logger.warn(
           { chatId },
           'Feishu channel not connected, skip sending message',
         );
-        return;
+        return undefined;
       }
-      await inner.sendMessage(chatId, text, localImagePaths, options);
+      return inner.sendMessage(chatId, text, localImagePaths, options);
     },
 
     async sendImage(
@@ -307,15 +307,16 @@ export function createTelegramChannel(
       chatId: string,
       text: string,
       localImagePaths?: string[],
-    ): Promise<void> {
+    ): Promise<string | undefined> {
       if (!inner) {
         logger.warn(
           { chatId },
           'Telegram channel not connected, skip sending message',
         );
-        return;
+        return undefined;
       }
       await inner.sendMessage(chatId, text, localImagePaths);
+      return undefined;
     },
 
     async sendImage(
@@ -413,15 +414,16 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
       }
     },
 
-    async sendMessage(chatId: string, text: string): Promise<void> {
+    async sendMessage(chatId: string, text: string): Promise<string | undefined> {
       if (!inner) {
         logger.warn(
           { chatId },
           'QQ channel not connected, skip sending message',
         );
-        return;
+        return undefined;
       }
       await inner.sendMessage(chatId, text);
+      return undefined;
     },
 
     async setTyping(_chatId: string, _isTyping: boolean): Promise<void> {

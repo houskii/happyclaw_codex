@@ -123,24 +123,24 @@ class IMConnectionManager {
     text: string,
     localImagePaths?: string[],
     options?: IMSendOptions,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const channelType = getChannelType(jid);
     if (!channelType) {
       logger.debug({ jid }, 'Unknown channel type for JID, skip sending');
-      return;
+      return undefined;
     }
 
     const chatId = extractChatId(jid);
     const channel = this.findChannelForJid(jid, channelType);
     if (channel) {
-      await channel.sendMessage(chatId, text, localImagePaths, options);
-      return;
+      return channel.sendMessage(chatId, text, localImagePaths, options);
     }
 
     logger.warn(
       { jid, channelType },
       'No IM channel available to send message',
     );
+    return undefined;
   }
 
   /**

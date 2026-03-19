@@ -75,6 +75,7 @@ export interface NewMessage {
   content: string;
   timestamp: string;
   attachments?: string;
+  reply_to_id?: string;
 }
 
 /** NewMessage with guaranteed rowid — returned by DB query functions */
