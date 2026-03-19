@@ -1,5 +1,12 @@
 import { create } from 'zustand';
-import { api } from '../api/client';
+import { api, type ApiError } from '../api/client';
+
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && 'message' in err)
+    return (err as ApiError).message;
+  return String(err);
+}
 
 export interface ScheduledTask {
   id: string;
@@ -34,6 +41,7 @@ interface TasksState {
   logs: Record<string, TaskRunLog[]>;
   loading: boolean;
   error: string | null;
+  runningTaskIds: Set<string>;
   loadTasks: () => Promise<void>;
   createTask: (
     groupFolder: string,
@@ -67,14 +75,20 @@ export const useTasksStore = create<TasksState>((set, get) => ({
   logs: {},
   loading: false,
   error: null,
+  runningTaskIds: new Set<string>(),
 
   loadTasks: async () => {
     set({ loading: true });
     try {
-      const data = await api.get<{ tasks: ScheduledTask[] }>('/api/tasks');
-      set({ tasks: data.tasks, loading: false, error: null });
+      const data = await api.get<{ tasks: ScheduledTask[]; runningTaskIds?: string[] }>('/api/tasks');
+      set({
+        tasks: data.tasks,
+        runningTaskIds: new Set(data.runningTaskIds || []),
+        loading: false,
+        error: null,
+      });
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+      set({ loading: false, error: extractErrorMessage(err) });
     }
   },
 
@@ -116,7 +130,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       set({ error: null });
       await get().loadTasks();
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -126,7 +140,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       set({ error: null });
       await get().loadTasks();
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -136,7 +150,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       set({ error: null });
       await get().loadTasks();
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -146,7 +160,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       set({ error: null });
       await get().loadTasks();
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -158,7 +172,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
         error: null,
       }));
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -166,11 +180,10 @@ export const useTasksStore = create<TasksState>((set, get) => ({
     try {
       await api.post(`/api/tasks/${id}/run`);
       set({ error: null });
-      // Refresh task list and logs after delays to catch fast and slow tasks
-      setTimeout(() => { get().loadTasks(); get().loadLogs(id); }, 8000);
-      setTimeout(() => { get().loadTasks(); get().loadLogs(id); }, 20000);
+      // Refresh immediately to pick up runningTaskIds from backend
+      await get().loadTasks();
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 }));

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Pencil, RefreshCw, X } from 'lucide-react';
+import { Check, Loader2, Pencil, RefreshCw, X } from 'lucide-react';
 import { ScheduledTask, useTasksStore } from '../../stores/tasks';
 import { showToast } from '../../utils/toast';
 
@@ -14,9 +14,10 @@ interface TaskDetailProps {
 }
 
 export function TaskDetail({ task }: TaskDetailProps) {
-  const { logs, loadLogs, updateTask } = useTasksStore();
+  const { logs, loadLogs, updateTask, runningTaskIds } = useTasksStore();
   const taskLogs = logs[task.id] || [];
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const isRunning = runningTaskIds.has(task.id);
 
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -225,12 +226,12 @@ export function TaskDetail({ task }: TaskDetailProps) {
           <textarea
             value={editForm.prompt}
             onChange={(e) => setEditForm({ ...editForm, prompt: e.target.value })}
-            rows={4}
-            className="w-full text-sm text-foreground bg-card px-3 py-2 rounded border border-border resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+            rows={6}
+            className="w-full text-sm text-foreground bg-card px-3 py-2 rounded border border-border resize-y min-h-[160px] max-h-[400px] overflow-y-auto focus:outline-none focus:ring-1 focus:ring-primary"
           />
         ) : (
           task.prompt && (
-            <div className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border whitespace-pre-wrap">
+            <div className="text-sm text-foreground bg-card px-3 py-2 rounded border border-border whitespace-pre-wrap max-h-[300px] overflow-y-auto">
               {task.prompt}
             </div>
           )
@@ -382,7 +383,13 @@ export function TaskDetail({ task }: TaskDetailProps) {
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
         </div>
-        {taskLogs.length === 0 ? (
+        {isRunning && (
+          <div className="flex items-center gap-2 text-sm text-primary bg-brand-50 px-3 py-2.5 rounded border border-brand-200 mb-2">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            任务执行中，等待结果...
+          </div>
+        )}
+        {taskLogs.length === 0 && !isRunning ? (
           <div className="text-sm text-slate-400 bg-card px-3 py-4 rounded border border-border text-center">
             暂无执行记录
           </div>

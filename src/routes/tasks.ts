@@ -26,6 +26,7 @@ import {
   canAccessGroup,
   getWebDeps,
 } from '../web-context.js';
+import { getRunningTaskIds } from '../task-scheduler.js';
 
 const tasksRoutes = new Hono<{ Variables: Variables }>();
 
@@ -44,7 +45,7 @@ tasksRoutes.get('/', authMiddleware, (c) => {
       return false;
     return true;
   });
-  return c.json({ tasks });
+  return c.json({ tasks, runningTaskIds: getRunningTaskIds() });
 });
 
 tasksRoutes.post('/', authMiddleware, async (c) => {

@@ -35,6 +35,7 @@ interface CreateTaskFormProps {
   }) => Promise<void>;
   onClose: () => void;
   isAdmin?: boolean;
+  homeFolder?: string;
 }
 
 const CHANNEL_OPTIONS = [
@@ -60,13 +61,16 @@ interface ParsedTask {
   summary: string;
 }
 
-export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTaskFormProps) {
+export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin, homeFolder }: CreateTaskFormProps) {
   const [mode, setMode] = useState<CreateMode>('ai');
+
+  // Resolve initial group from homeFolder
+  const initialGroup = homeFolder ? groups.find((g) => g.folder === homeFolder) : undefined;
 
   // --- AI mode state ---
   const [aiDescription, setAiDescription] = useState('');
-  const [aiGroupFolder, setAiGroupFolder] = useState('');
-  const [aiGroupJid, setAiGroupJid] = useState('');
+  const [aiGroupFolder, setAiGroupFolder] = useState(initialGroup?.folder || '');
+  const [aiGroupJid, setAiGroupJid] = useState(initialGroup?.jid || '');
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState('');
   const [parsedTask, setParsedTask] = useState<ParsedTask | null>(null);
@@ -74,8 +78,8 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
 
   // --- Manual mode state ---
   const [formData, setFormData] = useState({
-    groupFolder: '',
-    chatJid: '',
+    groupFolder: initialGroup?.folder || '',
+    chatJid: initialGroup?.jid || '',
     prompt: '',
     scheduleType: 'cron' as 'cron' | 'interval' | 'once',
     scheduleValue: '',
@@ -141,7 +145,7 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
       return;
     }
     if (!aiGroupFolder) {
-      setParseError('请先选择群组');
+      setParseError('请先选择执行工作区');
       return;
     }
     setParsing(true);
@@ -184,7 +188,7 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
   // --- Manual mode handlers ---
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
-    if (!formData.groupFolder) newErrors.groupFolder = '请选择群组';
+    if (!formData.groupFolder) newErrors.groupFolder = '请选择执行工作区';
     if (isScript) {
       if (!formData.scriptCommand.trim()) newErrors.scriptCommand = '请输入脚本命令';
     } else {
@@ -335,20 +339,27 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
             {/* Group */}
             <div>
               <label className="block text-sm font-medium text-foreground mb-2">
-                选择群组 <span className="text-red-500">*</span>
+                执行工作区 <span className="text-red-500">*</span>
               </label>
-              <Select value={aiGroupFolder || undefined} onValueChange={handleAiGroupChange}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="请选择" />
-                </SelectTrigger>
-                <SelectContent>
-                  {groups.map((group) => (
-                    <SelectItem key={group.jid} value={group.folder}>
-                      {group.name} ({group.folder})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {groups.length === 1 ? (
+                <p className="text-sm text-foreground bg-muted px-3 py-2 rounded border border-border">
+                  {groups[0].name} ({groups[0].folder})
+                </p>
+              ) : (
+                <Select value={aiGroupFolder || undefined} onValueChange={handleAiGroupChange}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="请选择" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {groups.map((group) => (
+                      <SelectItem key={group.jid} value={group.folder}>
+                        {group.name} ({group.folder})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <p className="mt-1 text-xs text-slate-500">默认使用主工作区，通常无需修改</p>
             </div>
 
             {/* Description */}
@@ -427,8 +438,8 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
                     <Textarea
                       value={parsedTask.prompt}
                       onChange={(e) => setParsedTask({ ...parsedTask, prompt: e.target.value })}
-                      rows={3}
-                      className="resize-none text-sm"
+                      rows={6}
+                      className="resize-y min-h-[120px] text-sm"
                     />
                   </div>
 
@@ -473,20 +484,27 @@ export function CreateTaskForm({ groups, onSubmit, onClose, isAdmin }: CreateTas
             {/* Group Selection */}
             <div>
               <label className="block text-sm font-medium text-foreground mb-2">
-                选择群组 <span className="text-red-500">*</span>
+                执行工作区 <span className="text-red-500">*</span>
               </label>
-              <Select value={formData.groupFolder || undefined} onValueChange={handleGroupChange}>
-                <SelectTrigger className={cn("w-full", errors.groupFolder && "border-red-500")}>
-                  <SelectValue placeholder="请选择" />
-                </SelectTrigger>
-                <SelectContent>
-                  {groups.map((group) => (
-                    <SelectItem key={group.jid} value={group.folder}>
-                      {group.name} ({group.folder})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {groups.length === 1 ? (
+                <p className="text-sm text-foreground bg-muted px-3 py-2 rounded border border-border">
+                  {groups[0].name} ({groups[0].folder})
+                </p>
+              ) : (
+                <Select value={formData.groupFolder || undefined} onValueChange={handleGroupChange}>
+                  <SelectTrigger className={cn("w-full", errors.groupFolder && "border-red-500")}>
+                    <SelectValue placeholder="请选择" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {groups.map((group) => (
+                      <SelectItem key={group.jid} value={group.folder}>
+                        {group.name} ({group.folder})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <p className="mt-1 text-xs text-slate-500">默认使用主工作区，通常无需修改</p>
               {errors.groupFolder && (
                 <p className="mt-1 text-sm text-red-600">{errors.groupFolder}</p>
               )}

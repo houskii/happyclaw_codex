@@ -71,6 +71,8 @@ export function TasksPage() {
     folder: group.folder,
   }));
 
+  const homeFolder = Object.values(groups).find((g) => g.is_my_home)?.folder;
+
   const activeTasks = tasks.filter((t) => t.status === 'active');
   const pausedTasks = tasks.filter((t) => t.status === 'paused');
   const otherTasks = tasks.filter((t) => t.status !== 'active' && t.status !== 'paused');
@@ -186,6 +188,7 @@ export function TasksPage() {
           onSubmit={handleCreateTask}
           onClose={() => setShowCreateForm(false)}
           isAdmin={isAdmin}
+          homeFolder={homeFolder}
         />
       )}
     </div>
