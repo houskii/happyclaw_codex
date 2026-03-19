@@ -170,7 +170,7 @@ export function FeishuChannelCard({ setNotice, setError }: FeishuChannelCardProp
           <span className={`inline-block w-2 h-2 rounded-full ${config?.connected ? 'bg-emerald-500' : 'bg-slate-300'}`} />
           <div>
             <h3 className="text-sm font-semibold text-slate-800">飞书 Feishu</h3>
-            <p className="text-xs text-slate-500 mt-0.5">接收飞书群消息并通过 Agent 自动回复</p>
+            <p className="text-xs text-slate-500 mt-0.5">前往<a href="https://open.larkoffice.com/app?lang=zh-CN" target="_blank" rel="noopener noreferrer" className="text-teal-600 hover:underline mx-0.5">飞书开放平台</a>创建应用，接收飞书群消息并通过 Agent 自动回复</p>
           </div>
         </div>
         <ToggleSwitch checked={enabled} disabled={loading || toggling} onChange={handleToggle} />

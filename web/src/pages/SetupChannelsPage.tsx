@@ -118,7 +118,7 @@ export function SetupChannelsPage() {
         <section className="bg-card rounded-xl border border-border shadow-sm p-5">
           <h2 className="text-base font-semibold text-foreground mb-3">飞书</h2>
           <p className="text-xs text-muted-foreground mb-3">
-            填写你的飞书应用凭证，绑定后即可在飞书中与 AI 对话。
+            前往<a href="https://open.larkoffice.com/app?lang=zh-CN" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline mx-0.5">飞书开放平台</a>创建应用并获取凭据，绑定后即可在飞书中与 AI 对话。
           </p>
           <div className="grid md:grid-cols-2 gap-3">
             <div>
