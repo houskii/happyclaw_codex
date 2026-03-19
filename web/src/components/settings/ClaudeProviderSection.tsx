@@ -23,7 +23,6 @@ import type {
   ClaudeThirdPartyProfileItem,
   ClaudeThirdPartyProfilesResp,
   EnvRow,
-  SettingsNotification,
 } from './types';
 import { getErrorMessage } from './types';
 
@@ -38,7 +37,10 @@ const RESERVED_ENV_KEYS = new Set([
   'ANTHROPIC_MODEL',
 ]);
 
-interface ClaudeProviderSectionProps extends SettingsNotification {}
+interface ClaudeProviderSectionProps {
+  setNotice: (msg: string | null) => void;
+  setError: (msg: string | null) => void;
+}
 
 function formatDateTime(value: string | null): string {
   if (!value) return '未记录';
