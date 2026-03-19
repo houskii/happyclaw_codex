@@ -4826,7 +4826,12 @@ async function main(): Promise<void> {
         {
           ignoreMessagesBefore: Date.now(),
           onCommand: handleCommand,
-          onBotAddedToGroup: buildOnNewChat(adminUser.id, homeFolder),
+          resolveGroupFolder: (chatJid: string) =>
+            resolveEffectiveFolder(chatJid),
+          resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+          onAgentMessage: buildOnAgentMessage(),
+          onBotAddedToGroup: (chatJid: string, chatName: string) =>
+            onNewChat(chatJid, chatName, 'group'),
           onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
           shouldProcessGroupMessage,
           onInterruptRequest: handleIMInterruptRequest,
@@ -4930,7 +4935,12 @@ async function main(): Promise<void> {
           {
             ignoreMessagesBefore,
             onCommand: handleCommand,
-            onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
+            resolveGroupFolder: (chatJid: string) =>
+              resolveEffectiveFolder(chatJid),
+            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+            onAgentMessage: buildOnAgentMessage(),
+            onBotAddedToGroup: (chatJid: string, chatName: string) =>
+              onNewChat(chatJid, chatName, 'group'),
             onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
             shouldProcessGroupMessage,
             onInterruptRequest: handleIMInterruptRequest,
