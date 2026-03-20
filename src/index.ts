@@ -4077,12 +4077,86 @@ async function startMessageLoop(): Promise<void> {
   }
 }
 
+// ─── Active Groups Store ─────────────────────────────────────
+// Tracks which groups had running agents, so we can auto-resume after restart.
+
+const ACTIVE_GROUPS_STORE_PATH = path.join(DATA_DIR, 'state', 'active-groups.json');
+
+interface ActiveGroupEntry {
+  chatJid: string;
+  folder: string;
+  startedAt: number;
+}
+
+function loadActiveGroupsStore(): ActiveGroupEntry[] {
+  try {
+    const data = fs.readFileSync(ACTIVE_GROUPS_STORE_PATH, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
+}
+
+function saveActiveGroupsStore(entries: ActiveGroupEntry[]): void {
+  try {
+    const dir = path.dirname(ACTIVE_GROUPS_STORE_PATH);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(ACTIVE_GROUPS_STORE_PATH, JSON.stringify(entries), 'utf-8');
+  } catch (err) {
+    logger.warn({ err }, 'Failed to save active groups store');
+  }
+}
+
+function addActiveGroup(chatJid: string, folder: string): void {
+  const entries = loadActiveGroupsStore().filter((e) => e.chatJid !== chatJid);
+  entries.push({ chatJid, folder, startedAt: Date.now() });
+  saveActiveGroupsStore(entries);
+}
+
+function removeActiveGroup(chatJid: string): void {
+  const entries = loadActiveGroupsStore().filter((e) => e.chatJid !== chatJid);
+  saveActiveGroupsStore(entries);
+}
+
 /**
- * Startup recovery: check for unprocessed messages in registered groups.
- * Handles crash between advancing global cursor and processing messages.
+ * Startup recovery: check for unprocessed messages in registered groups,
+ * AND auto-resume groups that had active agents before restart.
  */
 function recoverPendingMessages(): void {
+  const recoveredJids = new Set<string>();
+
+  // Phase 1: recover groups that had active agents before restart
+  const activeEntries = loadActiveGroupsStore();
+  if (activeEntries.length > 0) {
+    logger.info(
+      { count: activeEntries.length, groups: activeEntries.map((e) => e.folder) },
+      'Recovery: found previously active groups, injecting resume messages',
+    );
+    for (const entry of activeEntries) {
+      if (!registeredGroups[entry.chatJid]) continue;
+      // Inject a system message to trigger the agent
+      const msgId = `recovery-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+      ensureChatExists(entry.chatJid);
+      storeMessageDirect(
+        msgId,
+        entry.chatJid,
+        '__system__',
+        '[系统]',
+        '服务已重启，请继续之前的工作。',
+        new Date().toISOString(),
+        false,
+      );
+      broadcastRunnerState(entry.chatJid, 'queued', '服务重启后自动恢复');
+      queue.enqueueMessageCheck(entry.chatJid);
+      recoveredJids.add(entry.chatJid);
+    }
+    // Clear the store — these groups will be re-added when they start running
+    saveActiveGroupsStore([]);
+  }
+
+  // Phase 2: recover groups with unprocessed messages (existing logic)
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
+    if (recoveredJids.has(chatJid)) continue; // already recovered above
     const sinceCursor = lastAgentTimestamp[chatJid] || EMPTY_CURSOR;
     const pending = getMessagesSince(chatJid, sinceCursor);
     if (pending.length > 0) {
@@ -5229,6 +5303,14 @@ async function main(): Promise<void> {
       turnManager.getActiveTurn(folder),
     );
     syncPendingTurnObservability(folder);
+
+    // Track active groups for restart recovery
+    if (state === 'starting' || state === 'running') {
+      addActiveGroup(groupJid, folder);
+    }
+  });
+  queue.addOnContainerExitListener((groupJid) => {
+    removeActiveGroup(groupJid);
   });
   queue.setHostModeChecker((groupJid: string) => {
     let group = registeredGroups[groupJid];
