@@ -2173,6 +2173,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingBlocksManager.finalize(group.folder);
         }
 
+        // Complete the progress card after each turn so it doesn't stay at
+        // "执行中" while the agent idles between IPC messages.  The card
+        // resets to idle and will lazily create a new one on the next turn.
+        if (result.status === 'success' && progressCard) {
+          await progressCard.completeAndReset().catch(() => {});
+        }
+
           // Query 返回无文本结果（仅工具调用、send_message 等）：通知前端清除
           // 流式状态，避免 agent idle 期间持续显示"正在思考..."。
         if (result.status === 'success' && !result.result) {

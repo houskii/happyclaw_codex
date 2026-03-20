@@ -396,6 +396,29 @@ export class ProgressCardController {
   }
 
   /**
+   * Complete the current card and reset state so the controller can create a
+   * fresh card on the next feedEvent().  Used between turns when the agent
+   * stays alive via IPC — each turn gets its own card lifecycle.
+   */
+  async completeAndReset(): Promise<void> {
+    await this.complete();
+    // Reset tracking state so next feedEvent() starts a new card
+    this.state = 'idle';
+    this.messageId = null;
+    this.startedAt = Date.now();
+    this.activeTools.clear();
+    this.completedTools = [];
+    this.activeSubAgents.clear();
+    this.completedSubAgents = [];
+    this.isThinking = false;
+    this.thinkingText = '';
+    this.dirty = false;
+    this.abortReason = undefined;
+    this.patchFailCount = 0;
+    // Don't clear deleteTimer — let the completed card be deleted on its own schedule
+  }
+
+  /**
    * Dispose of active timers. The delete timer (post-completion cleanup)
    * is intentionally preserved so the card gets deleted after the delay.
    */
