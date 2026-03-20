@@ -4079,6 +4079,7 @@ async function startMessageLoop(): Promise<void> {
 
 // ─── Active Groups Store ─────────────────────────────────────
 // Tracks which groups had running agents, so we can auto-resume after restart.
+// Uses atomic write (tmp + rename) to avoid corruption on hard crash.
 
 const ACTIVE_GROUPS_STORE_PATH = path.join(DATA_DIR, 'state', 'active-groups.json');
 
@@ -4101,7 +4102,9 @@ function saveActiveGroupsStore(entries: ActiveGroupEntry[]): void {
   try {
     const dir = path.dirname(ACTIVE_GROUPS_STORE_PATH);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(ACTIVE_GROUPS_STORE_PATH, JSON.stringify(entries), 'utf-8');
+    const tmpPath = ACTIVE_GROUPS_STORE_PATH + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(entries), 'utf-8');
+    fs.renameSync(tmpPath, ACTIVE_GROUPS_STORE_PATH);
   } catch (err) {
     logger.warn({ err }, 'Failed to save active groups store');
   }
@@ -4128,12 +4131,29 @@ function recoverPendingMessages(): void {
   // Phase 1: recover groups that had active agents before restart
   const activeEntries = loadActiveGroupsStore();
   if (activeEntries.length > 0) {
+    const maxAge = getSystemSettings().containerTimeout * 2; // 2x timeout = stale
+    const now = Date.now();
+    // Deduplicate by folder — multiple JIDs can map to the same folder
+    const seenFolders = new Set<string>();
+
     logger.info(
       { count: activeEntries.length, groups: activeEntries.map((e) => e.folder) },
       'Recovery: found previously active groups, injecting resume messages',
     );
     for (const entry of activeEntries) {
       if (!registeredGroups[entry.chatJid]) continue;
+      // Skip stale entries (crashed long ago, likely not useful to resume)
+      if (now - entry.startedAt > maxAge) {
+        logger.info(
+          { folder: entry.folder, age: now - entry.startedAt },
+          'Recovery: skipping stale active group entry',
+        );
+        continue;
+      }
+      // Deduplicate by folder — only recover the first JID per folder
+      if (seenFolders.has(entry.folder)) continue;
+      seenFolders.add(entry.folder);
+
       // Inject a system message to trigger the agent
       const msgId = `recovery-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
       ensureChatExists(entry.chatJid);
@@ -5304,8 +5324,8 @@ async function main(): Promise<void> {
     );
     syncPendingTurnObservability(folder);
 
-    // Track active groups for restart recovery
-    if (state === 'starting' || state === 'running') {
+    // Track active groups for restart recovery (only on 'starting' to avoid redundant writes)
+    if (state === 'starting') {
       addActiveGroup(groupJid, folder);
     }
   });
