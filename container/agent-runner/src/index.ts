@@ -752,7 +752,7 @@ async function runQuery(
   allowedTools: string[] = DEFAULT_ALLOWED_TOOLS,
   disallowedTools?: string[],
   images?: Array<{ data: string; mimeType?: string }>,
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean; drainDetectedDuringQuery?: boolean }> {
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; lastResumeUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean; drainDetectedDuringQuery?: boolean }> {
   const stream = new MessageStream();
   // Track IM channels from initial prompt
   extractSourceChannels(prompt);
@@ -876,6 +876,15 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
+  // Track the latest safe resume point across ALL message types (assistant/text
+  // and user/tool_result). This prevents the fan-out branch problem: when the
+  // agent's final response in a query is tool_use-only (no text output),
+  // lastAssistantUuid stays stuck at an earlier text message. Without advancing,
+  // all subsequent queries branch from the same node and lose visibility of each
+  // other's turns — causing repeated/lost context (e.g. resending reports).
+  // By tracking the last tool_result UUID, we ensure the session advances
+  // linearly, preserving the full tool_use→tool_result pair in the next resume.
+  let lastResumeUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
 
@@ -1078,8 +1087,23 @@ async function runQuery(
         : typeof assistantContent === 'string';
       if (hasTextContent) {
         lastAssistantUuid = (message as { uuid: string }).uuid;
+        lastResumeUuid = lastAssistantUuid;
       }
       processor.processAssistantMessage(message as any);
+    }
+
+    // Track user(tool_result) UUIDs as resume points.
+    // When the agent ends a turn with only tool_use (e.g. send_message with no
+    // stdout text), lastAssistantUuid stays stuck at the earlier text message.
+    // Using the tool_result UUID preserves the full tool_use→tool_result pair
+    // in the resumed session, preventing the fan-out branch problem.
+    if (message.type === 'user' && 'uuid' in message) {
+      const userContent = (message as any).message?.content;
+      const hasToolResult = Array.isArray(userContent)
+        && userContent.some((b: { type: string }) => b.type === 'tool_result');
+      if (hasToolResult) {
+        lastResumeUuid = (message as { uuid: string }).uuid;
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
@@ -1236,8 +1260,8 @@ async function runQuery(
 
   ipcPolling = false;
   if (queryActivityTimer) clearTimeout(queryActivityTimer);
-  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}, drainDetectedDuringQuery: ${drainDetectedDuringQuery}`);
-  return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, drainDetectedDuringQuery };
+  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, lastResumeUuid: ${lastResumeUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}, drainDetectedDuringQuery: ${drainDetectedDuringQuery}`);
+  return { newSessionId, lastAssistantUuid, lastResumeUuid, closedDuringQuery, interruptedDuringQuery, drainDetectedDuringQuery };
   } catch (err) {
     ipcPolling = false;
     if (queryActivityTimer) clearTimeout(queryActivityTimer);
@@ -1360,7 +1384,16 @@ async function main(): Promise<void> {
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
-      if (queryResult.lastAssistantUuid) {
+      // Advance resumeAt to the latest safe resume point in the session.
+      // lastResumeUuid tracks the latest of: assistant(text) or user(tool_result).
+      // This ensures the session advances linearly even when the agent's last
+      // action is a tool_use without text output (common in IM chat where the
+      // agent only calls send_message). Without this, resumeAt sticks at an
+      // earlier text message, creating parallel branches where each query loses
+      // visibility of prior turns.
+      if (queryResult.lastResumeUuid) {
+        resumeAt = queryResult.lastResumeUuid;
+      } else if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
       }
 
