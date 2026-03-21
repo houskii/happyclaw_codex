@@ -39,7 +39,7 @@ interface GroupDetailProps {
 export function GroupDetail({ group }: GroupDetailProps) {
   const { updateGroup } = useGroupsStore();
   const [model, setModel] = useState(group.model || '__default__');
-  const [compression, setCompression] = useState(group.context_compression || 'off');
+  const [compression, setCompression] = useState<string>(group.context_compression || 'off');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [compressing, setCompressing] = useState(false);
