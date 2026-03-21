@@ -67,6 +67,43 @@ const API_TOKEN = process.env.HAPPYCLAW_INTERNAL_TOKEN || '';
 
 const log = createLogger('agent-runner-openai');
 
+// Approximate max tokens for conversation history (keep well under model context window)
+const MAX_HISTORY_CHARS = 800_000; // ~200k tokens at ~4 chars/token
+
+/**
+ * Estimate character count of a Chat Completions message array.
+ * Keeps the first message (system prompt) and trims oldest user/assistant pairs.
+ */
+function trimChatHistory(messages: ChatCompletionMessageParam[]): void {
+  let totalChars = 0;
+  for (const m of messages) {
+    totalChars += typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content || '').length;
+  }
+  // Keep system prompt (index 0) and trim from the front of conversation
+  while (totalChars > MAX_HISTORY_CHARS && messages.length > 3) {
+    const removed = messages.splice(1, 2); // Remove oldest user+assistant pair
+    for (const m of removed) {
+      totalChars -= typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content || '').length;
+    }
+  }
+}
+
+/**
+ * Estimate character count of Codex conversation items and trim oldest.
+ */
+function trimCodexHistory(items: CodexInputItem[]): void {
+  const itemSize = (item: CodexInputItem): number =>
+    'content' in item ? (item.content?.length ?? 0) : JSON.stringify(item).length;
+  let totalChars = 0;
+  for (const item of items) {
+    totalChars += itemSize(item);
+  }
+  while (totalChars > MAX_HISTORY_CHARS && items.length > 2) {
+    const removed = items.shift()!;
+    totalChars -= itemSize(removed);
+  }
+}
+
 // ─── Context Manager Setup ───────────────────────────────────
 
 function buildContextManager(ctx: PluginContext): ContextManager {
@@ -104,9 +141,11 @@ async function runChatCompletionsTurn(
   let resultText = '';
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let numTurns = 0;
   const startTime = Date.now();
 
   while (true) {
+    numTurns++;
     emitStreamEvent({ eventType: 'status', statusText: 'thinking' });
 
     const createParams: OpenAI.ChatCompletionCreateParamsStreaming = {
@@ -184,7 +223,7 @@ async function runChatCompletionsTurn(
           cacheCreationInputTokens: 0,
           costUSD: 0,
           durationMs: Date.now() - startTime,
-          numTurns: 1,
+          numTurns,
           modelUsage: {
             [OPENAI_MODEL]: {
               inputTokens: totalInputTokens,
@@ -253,9 +292,11 @@ async function runCodexTurn(
   const allNewItems: CodexInputItem[] = [];
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let numTurns = 0;
   const startTime = Date.now();
 
   while (true) {
+    numTurns++;
     emitStreamEvent({ eventType: 'status', statusText: 'thinking' });
 
     const result = await codexStreamRequest(
@@ -292,7 +333,7 @@ async function runCodexTurn(
           cacheCreationInputTokens: 0,
           costUSD: 0, // OpenAI Codex (ChatGPT subscription) doesn't have per-token cost
           durationMs: Date.now() - startTime,
-          numTurns: 1,
+          numTurns,
           modelUsage: {
             [OPENAI_MODEL]: {
               inputTokens: totalInputTokens,
@@ -422,6 +463,7 @@ async function runChatCompletionsMode(
     }
 
     messages.push({ role: 'user', content: nextMessage.text });
+    trimChatHistory(messages);
 
     try {
       const result = await runChatCompletionsTurn(client, messages, ctxMgr);
@@ -475,6 +517,7 @@ async function runCodexMode(
     }
 
     conversationItems.push({ type: 'message', role: 'user', content: nextMessage.text });
+    trimCodexHistory(conversationItems);
 
     try {
       const { text, newItems } = await runCodexTurn(

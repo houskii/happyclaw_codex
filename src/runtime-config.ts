@@ -3203,6 +3203,7 @@ export interface OpenAIProviderConfig {
   model?: string;
   proxyUrl?: string;
   oauthTokens?: OpenAIOAuthTokens;
+  oauthExpired?: boolean;
   updatedAt?: string;
 }
 
@@ -3272,6 +3273,14 @@ export function getOpenAIProviderConfig(): OpenAIProviderConfig {
             idToken: decrypted.idToken,
             expiresAt: decrypted.expiresAt,
           };
+          // Schedule lazy refresh if token expires within 5 minutes
+          if (
+            config.oauthTokens.expiresAt &&
+            config.oauthTokens.expiresAt < Date.now() + 5 * 60 * 1000
+          ) {
+            config.oauthExpired = true;
+            scheduleOpenAITokenRefresh();
+          }
         }
       }
       if (raw.baseUrl) config.baseUrl = raw.baseUrl;
@@ -3289,6 +3298,23 @@ export function getOpenAIProviderConfig(): OpenAIProviderConfig {
     baseUrl: process.env.OPENAI_BASE_URL || undefined,
     model: process.env.OPENAI_MODEL || undefined,
   };
+}
+
+// Debounced auto-refresh: only one refresh attempt at a time
+let _refreshInProgress = false;
+function scheduleOpenAITokenRefresh(): void {
+  if (_refreshInProgress) return;
+  _refreshInProgress = true;
+  refreshOpenAIOAuthTokens()
+    .then((ok) => {
+      if (!ok) logger.warn('OpenAI OAuth token auto-refresh failed');
+    })
+    .catch((err) => {
+      logger.warn({ err }, 'OpenAI OAuth token auto-refresh error');
+    })
+    .finally(() => {
+      _refreshInProgress = false;
+    });
 }
 
 export function saveOpenAIProviderConfig(
@@ -3316,7 +3342,7 @@ export function saveOpenAIProviderConfig(
   fs.writeFileSync(
     OPENAI_CONFIG_FILE,
     JSON.stringify(stored, null, 2),
-    'utf-8',
+    { encoding: 'utf-8', mode: 0o600 },
   );
   return { ...config, updatedAt: stored.updatedAt };
 }
@@ -3591,6 +3617,7 @@ export function disconnectOpenAIOAuth(): void {
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     model: config.model,
+    proxyUrl: config.proxyUrl,
   });
 }
 
@@ -3670,8 +3697,8 @@ export async function completePkceAuth(
       return { success: false, error: '回调 URL 中没有找到 code 参数' };
     }
 
-    if (state && state !== pendingPkce.state) {
-      return { success: false, error: 'state 参数不匹配，可能是过期的链接' };
+    if (!state || state !== pendingPkce.state) {
+      return { success: false, error: 'state 参数缺失或不匹配，可能是 CSRF 攻击或过期的链接' };
     }
 
     const { codeVerifier } = pendingPkce;

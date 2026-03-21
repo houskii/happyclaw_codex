@@ -76,7 +76,7 @@ async function* parseSSE(reader: ReadableStreamDefaultReader<Uint8Array>): Async
   let buffer = '';
   // Persist across chunks so split event/data lines aren't lost
   let currentEvent = '';
-  let currentData = '';
+  const dataLines: string[] = [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -90,18 +90,19 @@ async function* parseSSE(reader: ReadableStreamDefaultReader<Uint8Array>): Async
       if (line.startsWith('event: ')) {
         currentEvent = line.slice(7).trim();
       } else if (line.startsWith('data: ')) {
-        currentData = line.slice(6);
+        // SSE spec: multiple data: lines are concatenated with \n
+        dataLines.push(line.slice(6));
       } else if (line === '' && currentEvent) {
-        yield { event: currentEvent, data: currentData };
+        yield { event: currentEvent, data: dataLines.join('\n') };
         currentEvent = '';
-        currentData = '';
+        dataLines.length = 0;
       }
     }
   }
 
   // Flush any remaining event when the stream ends (e.g. response.completed)
-  if (currentEvent && currentData) {
-    yield { event: currentEvent, data: currentData };
+  if (currentEvent && dataLines.length > 0) {
+    yield { event: currentEvent, data: dataLines.join('\n') };
   }
 }
 

@@ -10,12 +10,29 @@
 
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import type {
   ContextPlugin,
   PluginContext,
   ToolDefinition,
   ToolResult,
 } from 'happyclaw-agent-runner-core';
+
+/**
+ * Validate that a resolved path is within allowed workspace directories.
+ * Prevents path traversal attacks (e.g., ../../etc/passwd).
+ */
+function assertWithinWorkspace(absPath: string, ctx: PluginContext): void {
+  const resolved = path.resolve(absPath);
+  const allowedRoots = [
+    ctx.workspaceGroup,
+    ctx.workspaceGlobal,
+    ctx.workspaceMemory,
+  ];
+  if (!allowedRoots.some((root) => resolved.startsWith(root + path.sep) || resolved === root)) {
+    throw new Error(`Path "${absPath}" is outside allowed workspace directories`);
+  }
+}
 
 export class LocalToolsPlugin implements ContextPlugin {
   readonly name = 'local-tools';
@@ -39,10 +56,10 @@ export class LocalToolsPlugin implements ContextPlugin {
           required: ['command'],
         },
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
-          const { execSync } = await import('child_process');
           const timeout = typeof args.timeout === 'number' ? args.timeout : 120000;
           try {
-            const result = execSync(String(args.command), {
+            // Use /bin/sh -c for shell features (pipes, redirects) but restrict cwd
+            const result = execFileSync('/bin/sh', ['-c', String(args.command)], {
               cwd: ctx.workspaceGroup,
               timeout,
               maxBuffer: 1024 * 1024,
@@ -103,6 +120,7 @@ export class LocalToolsPlugin implements ContextPlugin {
           const filePath = String(args.file_path);
           const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(ctx.workspaceGroup, filePath);
           try {
+            assertWithinWorkspace(absPath, ctx);
             fs.mkdirSync(path.dirname(absPath), { recursive: true });
             fs.writeFileSync(absPath, String(args.content));
             return { content: `File written: ${filePath}` };
@@ -126,14 +144,18 @@ export class LocalToolsPlugin implements ContextPlugin {
           required: ['pattern'],
         },
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
-          const { execSync } = await import('child_process');
           const searchPath = typeof args.path === 'string' ? args.path : ctx.workspaceGroup;
           const absPath = path.isAbsolute(searchPath) ? searchPath : path.resolve(ctx.workspaceGroup, searchPath);
-          let cmd = `rg --no-heading -n "${String(args.pattern).replace(/"/g, '\\"')}"`;
-          if (args.glob) cmd += ` --glob "${String(args.glob).replace(/"/g, '\\"')}"`;
-          cmd += ` "${absPath}"`;
+          // Use execFileSync with argument array to prevent shell injection
+          const rgArgs = ['--no-heading', '-n', String(args.pattern)];
+          if (args.glob) rgArgs.push('--glob', String(args.glob));
+          rgArgs.push(absPath);
           try {
-            const result = execSync(cmd, { encoding: 'utf-8', timeout: 30000, maxBuffer: 512 * 1024 });
+            const result = execFileSync('rg', rgArgs, {
+              encoding: 'utf-8',
+              timeout: 30000,
+              maxBuffer: 512 * 1024,
+            });
             const lines = result.split('\n');
             return { content: lines.length > 100 ? lines.slice(0, 100).join('\n') + `\n... (${lines.length} total matches)` : result };
           } catch {
@@ -155,15 +177,21 @@ export class LocalToolsPlugin implements ContextPlugin {
           required: ['pattern'],
         },
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
-          const { execSync } = await import('child_process');
           const basePath = typeof args.path === 'string' ? args.path : ctx.workspaceGroup;
           const absPath = path.isAbsolute(basePath) ? basePath : path.resolve(ctx.workspaceGroup, basePath);
           try {
-            const result = execSync(
-              `find "${absPath}" -name "${String(args.pattern).replace(/"/g, '\\"')}" -type f 2>/dev/null | head -200`,
-              { encoding: 'utf-8', timeout: 15000 },
-            );
-            return { content: result || 'No files found.' };
+            // Use execFileSync with argument array to prevent shell injection
+            const result = execFileSync('find', [
+              absPath, '-name', String(args.pattern), '-type', 'f',
+            ], {
+              encoding: 'utf-8',
+              timeout: 15000,
+              maxBuffer: 512 * 1024,
+            });
+            // Limit output to 200 lines
+            const lines = result.split('\n').filter(Boolean);
+            const limited = lines.slice(0, 200);
+            return { content: limited.join('\n') || 'No files found.' };
           } catch {
             return { content: 'No files found.' };
           }
