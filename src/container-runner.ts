@@ -1084,16 +1084,20 @@ export async function runHostAgent(
   }
 
   // Cross-model plugin: inject OpenAI credentials for ask_model tool (all runners)
+  // Prefer OAuth (Codex, subscription-covered) over API key (paid per token)
   {
     const crossModelConfig = getOpenAIProviderConfig();
+    if (crossModelConfig.authMode === 'chatgpt_oauth' && crossModelConfig.oauthTokens?.accessToken) {
+      hostEnv['CROSSMODEL_OPENAI_ACCESS_TOKEN'] = crossModelConfig.oauthTokens.accessToken;
+    }
     if (crossModelConfig.apiKey) {
       hostEnv['CROSSMODEL_OPENAI_API_KEY'] = crossModelConfig.apiKey;
       if (crossModelConfig.baseUrl) {
         hostEnv['CROSSMODEL_OPENAI_BASE_URL'] = crossModelConfig.baseUrl;
       }
-      if (crossModelConfig.model) {
-        hostEnv['CROSSMODEL_OPENAI_MODEL'] = crossModelConfig.model;
-      }
+    }
+    if (crossModelConfig.model) {
+      hostEnv['CROSSMODEL_OPENAI_MODEL'] = crossModelConfig.model;
     }
   }
 
