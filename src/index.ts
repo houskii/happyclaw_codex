@@ -1817,6 +1817,63 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     cursorCommitted = true;
   };
 
+  // Auto-compression: fire-and-forget after successful completion.
+  // Called from both 'drained' and normal-exit paths.
+  // For IM groups with target_main_jid, inherit compression setting from target group.
+  const tryAutoCompress = (): void => {
+    // IM groups default to 'off' — when bound via target_main_jid, inherit
+    // the target group's setting instead of using their own default.
+    const ownCompression = group.context_compression;
+    const effectiveCompression =
+      (ownCompression && ownCompression !== 'off')
+        ? ownCompression
+        : (group.target_main_jid
+            ? (registeredGroups[group.target_main_jid] ?? getRegisteredGroup(group.target_main_jid))
+                ?.context_compression
+            : undefined) ?? ownCompression ?? 'off';
+    if (
+      effectiveCompression !== 'auto' ||
+      !shouldAutoCompress(effectiveGroup.folder, chatJid)
+    ) {
+      return;
+    }
+    const folder = effectiveGroup.folder;
+    const sessionIdBeforeCompress = sessions[folder];
+    const compressBoundary = new Date().toISOString();
+    const compressOpts = buildCompressOptions(group);
+    if (compressOpts) {
+      compressOpts.beforeTimestamp = compressBoundary;
+    }
+    compressContext(folder, chatJid, compressOpts ?? { beforeTimestamp: compressBoundary })
+      .then((result) => {
+        if (result.success) {
+          if (sessions[folder] === sessionIdBeforeCompress) {
+            delete sessions[folder];
+          } else {
+            logger.info(
+              { folder, chatJid },
+              'Session changed during auto-compression, skipping session clear (new agent run likely started)',
+            );
+          }
+          logger.info(
+            { folder, chatJid, messageCount: result.messageCount },
+            'Auto-compressed context after successful agent run',
+          );
+          const extractedMsg = result.extractedKnowledge
+            ? `，萃取了 ${result.extractedKnowledge} 条知识到记忆系统`
+            : '';
+          sendSystemMessage(
+            chatJid,
+            'context_compressed',
+            `历史对话已自动压缩为摘要（${result.messageCount} 条消息${extractedMsg}），后续对话基于摘要继续。`,
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error({ folder, chatJid, err }, 'Auto-compression failed');
+      });
+  };
+
   const finalizeCurrentTurn = (
     status: 'completed' | 'error' | 'interrupted' | 'drained',
     options?: { errorDetail?: string },
@@ -2373,9 +2430,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // Drained: query completed, process exiting for turn boundary.
-  // This is a successful completion — commit cursor and return.
+  // This is a successful completion — commit cursor, run auto-compression, and return.
   if (output.status === 'drained') {
     commitCursor();
+    tryAutoCompress();
     return true;
   }
 
@@ -2481,6 +2539,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Context overflow detected, skipping retry',
       );
       commitCursor();
+      tryAutoCompress();
       triggerMessagesByFolder.delete(effectiveGroup.folder);
       return true;
     }
@@ -2529,54 +2588,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Final fallback for silent-success paths (no visible reply).
   commitCursor();
-
-  // Auto-compression: fire-and-forget after successful completion.
-  // Capture the current session ID so we can detect if a new agent run started
-  // during compression (which would make deleting the session unsafe).
-  if (
-    group.context_compression === 'auto' &&
-    shouldAutoCompress(effectiveGroup.folder, chatJid)
-  ) {
-    const folder = effectiveGroup.folder;
-    const sessionIdBeforeCompress = sessions[folder];
-    // Snapshot the current time as the message boundary — only compress messages
-    // that existed before this point, preventing new messages from being included
-    // in the summary while also remaining in the active session.
-    const compressBoundary = new Date().toISOString();
-    const compressOpts = buildCompressOptions(group);
-    if (compressOpts) {
-      compressOpts.beforeTimestamp = compressBoundary;
-    }
-    compressContext(folder, chatJid, compressOpts ?? { beforeTimestamp: compressBoundary })
-      .then((result) => {
-        if (result.success) {
-          // Only clear session if no new agent run has started during compression
-          if (sessions[folder] === sessionIdBeforeCompress) {
-            delete sessions[folder];
-          } else {
-            logger.info(
-              { folder, chatJid },
-              'Session changed during auto-compression, skipping session clear (new agent run likely started)',
-            );
-          }
-          logger.info(
-            { folder, chatJid, messageCount: result.messageCount },
-            'Auto-compressed context after successful agent run',
-          );
-          const extractedMsg = result.extractedKnowledge
-            ? `，萃取了 ${result.extractedKnowledge} 条知识到记忆系统`
-            : '';
-          sendSystemMessage(
-            chatJid,
-            'context_compressed',
-            `历史对话已自动压缩为摘要（${result.messageCount} 条消息${extractedMsg}），后续对话基于摘要继续。`,
-          );
-        }
-      })
-      .catch((err) => {
-        logger.error({ folder, chatJid, err }, 'Auto-compression failed');
-      });
-  }
+  tryAutoCompress();
 
   triggerMessagesByFolder.delete(effectiveGroup.folder);
   return true;
