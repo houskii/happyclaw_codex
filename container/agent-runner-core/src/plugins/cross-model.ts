@@ -7,7 +7,7 @@
  * Environment variables:
  * - CROSSMODEL_OPENAI_API_KEY: OpenAI API key for cross-model calls
  * - CROSSMODEL_OPENAI_BASE_URL: Optional custom base URL
- * - CROSSMODEL_OPENAI_MODEL: Model to use (default: gpt-4.1)
+ * - CROSSMODEL_OPENAI_MODEL: Model to use (default: gpt-5.4-mini)
  */
 
 import type { ContextPlugin, PluginContext, ToolDefinition, ToolResult } from '../plugin.js';
@@ -17,7 +17,7 @@ export interface CrossModelPluginOptions {
   openaiApiKey?: string;
   /** Optional base URL override. */
   openaiBaseUrl?: string;
-  /** Model to use for cross-model calls. Default: gpt-4.1 */
+  /** Model to use for cross-model calls. Default: gpt-5.4-mini */
   openaiModel?: string;
   /** Max tokens for response. Default: 4096 */
   maxTokens?: number;
@@ -62,7 +62,7 @@ export class CrossModelPlugin implements ContextPlugin {
             },
             model: {
               type: 'string',
-              description: '可选：指定具体模型（如 gpt-4.1, o3-mini）。不指定则使用默认模型。',
+              description: '可选：指定具体模型（如 gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, o3, gpt-5.3-codex）。不指定则使用默认模型 gpt-5.4-mini。',
             },
           },
           required: ['prompt'],
@@ -90,7 +90,7 @@ export class CrossModelPlugin implements ContextPlugin {
   private async executeAskModel(args: Record<string, unknown>): Promise<ToolResult> {
     const prompt = String(args.prompt || '');
     const system = args.system ? String(args.system) : undefined;
-    const model = args.model ? String(args.model) : (this.opts.openaiModel || process.env.CROSSMODEL_OPENAI_MODEL || 'gpt-4.1');
+    const model = args.model ? String(args.model) : (this.opts.openaiModel || process.env.CROSSMODEL_OPENAI_MODEL || 'gpt-5.4-mini');
 
     if (!prompt.trim()) {
       return { content: 'Error: prompt is required', isError: true };
