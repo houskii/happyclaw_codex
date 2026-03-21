@@ -28,6 +28,8 @@ export interface CrossModelPluginOptions {
   maxTokens?: number;
 }
 
+type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
 const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
 export class CrossModelPlugin implements ContextPlugin {
@@ -79,13 +81,15 @@ export class CrossModelPlugin implements ContextPlugin {
             },
             reasoning_effort: {
               type: 'string',
-              enum: ['low', 'medium', 'high'],
+              enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
               description:
                 '推理深度。根据任务复杂度动态选择：' +
+                'xhigh — 最高推理，用于极复杂架构/安全审查；' +
                 'high — 架构评审、安全审查、复杂方案设计（P0 场景）；' +
                 'medium — 代码 review、测试用例补全（P1 场景）；' +
-                'low — 简单问答、翻译、总结。' +
-                '不指定时根据 prompt 长度自动推断。',
+                'low — 简单问答、翻译、总结；' +
+                'minimal/none — 最低推理或无推理。' +
+                '不指定时根据 prompt 内容自动推断。',
             },
           },
           required: ['prompt'],
@@ -120,7 +124,7 @@ export class CrossModelPlugin implements ContextPlugin {
    * Infer reasoning effort from prompt characteristics if not explicitly specified.
    * Longer, more complex prompts get higher effort.
    */
-  private inferReasoningEffort(prompt: string): 'low' | 'medium' | 'high' {
+  private inferReasoningEffort(prompt: string): ReasoningEffort {
     const len = prompt.length;
     // Keywords suggesting complex analysis
     const complexKeywords = /架构|schema|migration|安全|认证|权限|并发|锁|删除|回滚|不可逆|评审|review|audit/i;
@@ -138,7 +142,7 @@ export class CrossModelPlugin implements ContextPlugin {
 
     // Resolve reasoning effort: explicit > auto-infer
     const reasoningEffort = args.reasoning_effort
-      ? (String(args.reasoning_effort) as 'low' | 'medium' | 'high')
+      ? (String(args.reasoning_effort) as ReasoningEffort)
       : this.inferReasoningEffort(prompt);
 
     if (!prompt.trim()) {
@@ -168,7 +172,7 @@ export class CrossModelPlugin implements ContextPlugin {
     model: string,
     prompt: string,
     system?: string,
-    reasoningEffort: 'low' | 'medium' | 'high' = 'low',
+    reasoningEffort: ReasoningEffort = 'low',
   ): Promise<ToolResult> {
     try {
       const requestBody: Record<string, unknown> = {
@@ -180,10 +184,8 @@ export class CrossModelPlugin implements ContextPlugin {
         store: false,
       };
 
-      // Enable reasoning with specified effort level
-      if (reasoningEffort !== 'low') {
-        requestBody.reasoning = { effort: reasoningEffort };
-      }
+      // Always pass reasoning effort (GPT-5.4 defaults to 'none' if omitted)
+      requestBody.reasoning = { effort: reasoningEffort };
 
       const response = await fetch(CODEX_API_URL, {
         method: 'POST',
@@ -265,7 +267,7 @@ export class CrossModelPlugin implements ContextPlugin {
     model: string,
     prompt: string,
     system?: string,
-    reasoningEffort: 'low' | 'medium' | 'high' = 'low',
+    reasoningEffort: ReasoningEffort = 'low',
   ): Promise<ToolResult> {
     const baseUrl = this.opts.openaiBaseUrl || process.env.CROSSMODEL_OPENAI_BASE_URL || 'https://api.openai.com/v1';
     const maxTokens = this.opts.maxTokens || 4096;
@@ -283,10 +285,8 @@ export class CrossModelPlugin implements ContextPlugin {
         max_completion_tokens: maxTokens,
       };
 
-      // Enable reasoning for Chat Completions API
-      if (reasoningEffort !== 'low') {
-        requestBody.reasoning_effort = reasoningEffort;
-      }
+      // Always pass reasoning effort
+      requestBody.reasoning_effort = reasoningEffort;
 
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
