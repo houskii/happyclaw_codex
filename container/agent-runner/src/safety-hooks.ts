@@ -18,153 +18,28 @@ import type {
   PostToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 
+import { callLlm, getLlmCredentials, hasLlmCredentials, type LlmCredentials } from './gpt-client.js';
+import {
+  assessBashRisk,
+  assessEditWriteRisk,
+  redactToolInput,
+  redactSecrets,
+  type RiskAssessment,
+} from './risk-rules.js';
+
 // ─── Constants ─────────────────────────────────────────────
 
 const GATEKEEPER_TIMEOUT_MS = 10_000;
 
-const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
-const CHAT_COMPLETIONS_API_URL = 'https://api.openai.com/v1/chat/completions';
-
-// ─── Gatekeeper: Risk Patterns ─────────────────────────────
-
-/** Bash commands that warrant GPT review before execution */
-const DANGEROUS_BASH_PATTERNS = [
-  /\brm\s+-\w*r\w*f/,             // rm -rf variants
-  /\bgit\s+reset\s+--hard/,       // git reset --hard
-  /\bgit\s+clean\s+-\w*f/,        // git clean -f
-  /\bgit\s+push\s+.*--force/,     // git push --force
-  /\bgit\s+branch\s+-\w*D/,       // git branch -D
-  /\bDROP\s+(TABLE|DATABASE)/i,    // SQL DROP
-  /\bTRUNCATE\s+TABLE/i,          // SQL TRUNCATE
-  /\bDELETE\s+FROM\b(?!.*WHERE)/i, // DELETE without WHERE
-  /\bmkfs\b/,                      // format filesystem
-  /\bdd\s+if=/,                    // raw disk write
-  /\bchmod\s+777\b/,              // world-writable permissions
-  /\bkill\s+-9\b/,                // force kill
-  /\bcurl\b.*\|\s*(ba)?sh/,       // pipe to shell
-  /\bwget\b.*\|\s*(ba)?sh/,       // pipe to shell
-  /\bsudo\b/,                      // sudo
-];
-
-/** Files that require extra caution when modified */
-const SENSITIVE_FILE_PATTERNS = [
-  /\.env/i,
-  /authorized_keys/i,
-  /sshd_config/i,
-  /\.gnupg\//i,
-  /Dockerfile/i,
-  /docker-compose/i,
-  /\.github\/workflows/i,
-  /ci\/.*\.ya?ml/i,
-  /deploy/i,
-  /migration/i,
-  /\.pem$/i,
-  /\.key$/i,
-  /secrets?\./i,
-  /credentials?\./i,
-];
-
-interface RiskAssessment {
-  score: number;       // 0-100
-  reasons: string[];
-  needsGptCheck: boolean;
-}
-
-function assessBashRisk(command: string): RiskAssessment {
-  const reasons: string[] = [];
-  let score = 0;
-
-  for (const pattern of DANGEROUS_BASH_PATTERNS) {
-    if (pattern.test(command)) {
-      reasons.push(`危险命令模式: ${pattern}`);
-      score += 40;
-    }
-  }
-
-  // Multi-pipe chains with side effects
-  if ((command.match(/\|/g) || []).length >= 3) {
-    reasons.push('复杂管道链');
-    score += 10;
-  }
-
-  // Commands targeting root/system paths
-  if (/\s\/(?:etc|usr|var|root|boot)\b/.test(command)) {
-    reasons.push('涉及系统目录');
-    score += 20;
-  }
-
-  return {
-    score: Math.min(score, 100),
-    reasons,
-    needsGptCheck: score >= 30,
-  };
-}
-
-function assessEditWriteRisk(filePath: string, content?: string): RiskAssessment {
-  const reasons: string[] = [];
-  let score = 0;
-
-  for (const pattern of SENSITIVE_FILE_PATTERNS) {
-    if (pattern.test(filePath)) {
-      reasons.push(`敏感文件: ${filePath}`);
-      score += 30;
-      break;
-    }
-  }
-
-  if (content) {
-    // Check for secrets being written
-    if (/(?:api[_-]?key|secret|password|token)\s*[:=]\s*['"][^'"]{8,}/i.test(content)) {
-      reasons.push('可能在写入硬编码凭据');
-      score += 40;
-    }
-  }
-
-  return {
-    score: Math.min(score, 100),
-    reasons,
-    needsGptCheck: score >= 30,
-  };
-}
-
 // ─── Gatekeeper: GPT Check ────────────────────────────────
 
-/** Redact sensitive content from tool input before sending to external LLM */
-function redactToolInput(toolName: string, toolInput: unknown): string {
-  if (typeof toolInput === 'string') return toolInput.slice(0, 2000);
-  const input = toolInput as Record<string, unknown> | null;
-  if (!input) return '{}';
-
-  // For Edit/Write on sensitive files, redact the actual content
-  const filePath = (input.file_path as string) || (input.path as string) || '';
-  const isSensitive = SENSITIVE_FILE_PATTERNS.some(p => p.test(filePath));
-
-  if (isSensitive && (toolName === 'Edit' || toolName === 'Write')) {
-    const redacted = { ...input };
-    if (redacted.new_string) redacted.new_string = '[REDACTED: sensitive file content]';
-    if (redacted.old_string) redacted.old_string = '[REDACTED: sensitive file content]';
-    if (redacted.content) redacted.content = '[REDACTED: sensitive file content]';
-    return JSON.stringify(redacted, null, 2).slice(0, 2000);
-  }
-
-  // For Bash commands, redact inline secrets (env vars, tokens in args)
-  if (toolName === 'Bash') {
-    let cmd = (input.command as string) || '';
-    cmd = cmd.replace(/((?:api[_-]?key|secret|password|token|bearer)\s*[=:]\s*)\S+/gi, '$1[REDACTED]');
-    return JSON.stringify({ ...input, command: cmd }, null, 2).slice(0, 2000);
-  }
-
-  return JSON.stringify(input, null, 2).slice(0, 2000);
-}
-
 async function gptIntentCheck(
+  creds: LlmCredentials,
   toolName: string,
   toolInput: unknown,
   risk: RiskAssessment,
 ): Promise<{ allow: boolean; guidance?: string }> {
-  const accessToken = process.env.CROSSMODEL_OPENAI_ACCESS_TOKEN;
-  const apiKey = process.env.CROSSMODEL_OPENAI_API_KEY;
-  if (!accessToken && !apiKey) return { allow: true };
+  if (!hasLlmCredentials(creds)) return { allow: true };
 
   const inputStr = redactToolInput(toolName, toolInput);
 
@@ -185,67 +60,33 @@ ${risk.reasons.map(r => `- ${r}`).join('\n')}
 只回答以上三点，每点一行。`;
 
   try {
-    const text = accessToken
-      ? await callApi(CODEX_API_URL, prompt, accessToken, true)
-      : await callApi(CHAT_COMPLETIONS_API_URL, prompt, apiKey!, false);
+    const text = await callLlm(creds, {
+      prompt,
+      system: '你是安全审计员。简洁回答，不要废话。',
+      model: 'gpt-5.4-mini',
+      reasoningEffort: 'medium',
+      timeoutMs: GATEKEEPER_TIMEOUT_MS,
+    });
 
     const lower = text.toLowerCase();
     if (lower.includes('阻止') || lower.includes('block')) {
       return { allow: false, guidance: text };
     }
     if (lower.includes('需要确认') || lower.includes('confirm')) {
-      // Inject guidance but allow — Claude should ask the user
       return { allow: true, guidance: `⚠️ GPT 安全检查建议确认：\n${text}` };
     }
     return { allow: true };
   } catch {
-    // GPT unavailable — don't block, just let it through
+    // GPT unavailable — degrade based on risk score
+    if (risk.score >= 70) {
+      // High risk + no GPT: require confirmation instead of silent pass
+      return {
+        allow: true,
+        guidance: `⚠️ 高风险操作（分数 ${risk.score}），GPT 安全检查不可用，建议确认后执行。\n风险: ${risk.reasons.join('; ')}`,
+      };
+    }
     return { allow: true };
   }
-}
-
-async function callApi(url: string, prompt: string, token: string, isCodex: boolean): Promise<string> {
-  const body = isCodex
-    ? {
-        model: 'gpt-5.4-mini',
-        instructions: '你是安全审计员。简洁回答，不要废话。',
-        input: [{ role: 'user', content: prompt }],
-        reasoning: { effort: 'medium' },
-        stream: false,
-      }
-    : {
-        model: 'gpt-5.4-mini',
-        messages: [
-          { role: 'system', content: '你是安全审计员。简洁回答，不要废话。' },
-          { role: 'user', content: prompt },
-        ],
-        reasoning_effort: 'medium',
-      };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(GATEKEEPER_TIMEOUT_MS),
-  });
-
-  if (!response.ok) throw new Error(`API ${response.status}`);
-
-  const data = await response.json() as any;
-  if (isCodex && data.output) {
-    for (const item of data.output) {
-      if (item.type === 'message' && item.content) {
-        for (const block of item.content) {
-          if (block.type === 'output_text') return block.text;
-        }
-      }
-    }
-    throw new Error('No text in response');
-  }
-  return data.choices?.[0]?.message?.content || '';
 }
 
 // ─── Loop Detection ────────────────────────────────────────
@@ -255,23 +96,22 @@ interface ToolFingerprint {
   argsHash: string;
   exitCode?: number;
   timestamp: number;
+  /** Redacted error snippet — safe to send externally */
   errorSnippet?: string;
 }
 
 const MAX_FINGERPRINTS = 15;
-const LOOP_THRESHOLD = 3; // same fingerprint N times = stuck
-const ERROR_REPEAT_THRESHOLD = 2; // same error N times = stuck
-const COACH_COOLDOWN_MS = 60_000; // don't coach more than once per minute
+const LOOP_THRESHOLD = 3;
+const ERROR_REPEAT_THRESHOLD = 2;
+const COACH_COOLDOWN_MS = 60_000;
 
 let recentFingerprints: ToolFingerprint[] = [];
 let lastCoachTime = 0;
 
 function hashArgs(toolName: string, toolInput: unknown): string {
-  // Simple hash: tool name + first 200 chars of stringified input
   const inputStr = typeof toolInput === 'string'
     ? toolInput.slice(0, 200)
     : JSON.stringify(toolInput || '').slice(0, 200);
-  // djb2 hash
   let hash = 5381;
   const str = `${toolName}:${inputStr}`;
   for (let i = 0; i < str.length; i++) {
@@ -284,9 +124,10 @@ function extractErrorSnippet(toolResponse: unknown): string | undefined {
   const str = typeof toolResponse === 'string'
     ? toolResponse
     : JSON.stringify(toolResponse || '');
-  // Look for common error patterns
   const errorMatch = str.match(/(?:error|Error|ERROR|failed|FAILED|panic|PANIC)[^\n]{0,150}/);
-  return errorMatch?.[0];
+  if (!errorMatch) return undefined;
+  // Redact before storing — fingerprints may be sent to GPT
+  return redactSecrets(errorMatch[0]);
 }
 
 function extractExitCode(toolResponse: unknown): number | undefined {
@@ -347,16 +188,17 @@ function detectLoop(newFp: ToolFingerprint): LoopDetection {
   return { isStuck: false };
 }
 
-async function getCoachAdvice(detection: LoopDetection): Promise<string | null> {
+async function getCoachAdvice(
+  creds: LlmCredentials,
+  detection: LoopDetection,
+): Promise<string | null> {
   const now = Date.now();
   if (now - lastCoachTime < COACH_COOLDOWN_MS) return null;
-
-  const accessToken = process.env.CROSSMODEL_OPENAI_ACCESS_TOKEN;
-  const apiKey = process.env.CROSSMODEL_OPENAI_API_KEY;
-  if (!accessToken && !apiKey) return null;
+  if (!hasLlmCredentials(creds)) return null;
 
   lastCoachTime = now;
 
+  // Fingerprints are already redacted at collection time
   const recentCalls = recentFingerprints.slice(-8).map(fp =>
     `  ${fp.toolName} (${fp.exitCode !== undefined ? `exit=${fp.exitCode}` : 'ok'})${fp.errorSnippet ? `: ${fp.errorSnippet.slice(0, 80)}` : ''}`
   ).join('\n');
@@ -374,10 +216,13 @@ ${recentCalls}
 - 如果看起来是环境/依赖问题，建议先诊断再修复`;
 
   try {
-    const text = accessToken
-      ? await callApi(CODEX_API_URL, prompt, accessToken, true)
-      : await callApi(CHAT_COMPLETIONS_API_URL, prompt, apiKey!, false);
-    return text;
+    return await callLlm(creds, {
+      prompt,
+      system: '你是开发顾问。给出具体的替代方案，简洁回复。',
+      model: 'gpt-5.4-mini',
+      reasoningEffort: 'medium',
+      timeoutMs: GATEKEEPER_TIMEOUT_MS,
+    });
   } catch {
     return null;
   }
@@ -390,6 +235,8 @@ ${recentCalls}
  * Scores risk locally, calls GPT only for high-risk operations.
  */
 export function createGatekeeperHook(log: (msg: string) => void): HookCallback {
+  const creds = getLlmCredentials();
+
   return async (input, _toolUseId, _options) => {
     const hookInput = input as PreToolUseHookInput;
     const { tool_name, tool_input } = hookInput;
@@ -412,7 +259,7 @@ export function createGatekeeperHook(log: (msg: string) => void): HookCallback {
 
     log(`[gatekeeper] Risk score ${risk.score} for ${tool_name}: ${risk.reasons.join(', ')}`);
 
-    const result = await gptIntentCheck(tool_name, tool_input, risk);
+    const result = await gptIntentCheck(creds, tool_name, tool_input, risk);
 
     if (!result.allow) {
       log(`[gatekeeper] BLOCKED ${tool_name}: ${result.guidance?.slice(0, 100)}`);
@@ -441,6 +288,8 @@ export function createGatekeeperHook(log: (msg: string) => void): HookCallback {
  * Tracks tool call patterns and detects repetitive failures.
  */
 export function createLoopRecoveryHook(log: (msg: string) => void): HookCallback {
+  const creds = getLlmCredentials();
+
   return async (input, _toolUseId, _options) => {
     const hookInput = input as PostToolUseHookInput;
 
@@ -465,7 +314,7 @@ export function createLoopRecoveryHook(log: (msg: string) => void): HookCallback
 
     log(`[loop-coach] Stuck detected: ${detection.reason}`);
 
-    const advice = await getCoachAdvice(detection);
+    const advice = await getCoachAdvice(creds, detection);
     if (!advice) return {};
 
     log(`[loop-coach] Injecting recovery advice`);

@@ -1,10 +1,11 @@
 /**
  * Code Review Hooks — Automatic GPT parallel review for code changes.
  *
- * Architecture (Plan C):
+ * Architecture:
  * 1. PostToolUse hook: Lightweight collector — appends mutations as NDJSON events
- * 2. Stop hook: Review Coordinator — aggregates mutations, classifies severity,
- *    calls GPT via CrossModel API, injects review as IPC output message
+ *    - Tracks Edit, Write, AND Bash commands that write files
+ *    - Triggers incremental review when accumulated changes hit major threshold
+ * 2. Stop hook: Review Coordinator — final review for remaining unreviewd changes
  *
  * Design principles:
  * - Hook layer only collects, never reviews
@@ -12,6 +13,7 @@
  * - Append-only NDJSON state file for concurrency safety
  * - Review results sent via IPC for the user to see
  * - GPT receives actual diff content, not just metadata
+ * - Sensitive file content is never sent externally
  */
 
 import fs from 'fs';
@@ -20,6 +22,16 @@ import type {
   HookCallback,
   PostToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
+
+import { callLlm, getLlmCredentials, hasLlmCredentials, type LlmCredentials } from './gpt-client.js';
+import {
+  isSensitivePath,
+  isRiskPath,
+  RISK_CONTENT_KEYWORDS,
+  detectContentRiskSignals,
+  bashCommandWritesFiles,
+  extractBashAffectedPaths,
+} from './risk-rules.js';
 
 // ─── Types ─────────────────────────────────────────────────
 
@@ -46,13 +58,11 @@ interface ChangeClassification {
   newFiles: number;
   hasRiskSignal: boolean;
   riskSignals: string[];
-  /** Force review regardless of line counts */
   forceReview: boolean;
 }
 
 // ─── Constants ─────────────────────────────────────────────
 
-/** Hard timeout for GPT review calls (ms). Major uses gpt-5.4 which needs more time. */
 const REVIEW_TIMEOUT_MAJOR_MS = 30_000;
 const REVIEW_TIMEOUT_MEDIUM_MS = 15_000;
 
@@ -61,54 +71,6 @@ const MAX_DIFF_CHARS = 3000;
 
 /** Max total diff chars sent to GPT */
 const MAX_TOTAL_DIFF_CHARS = 15000;
-
-const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
-const CHAT_COMPLETIONS_API_URL = 'https://api.openai.com/v1/chat/completions';
-
-const RISK_PATH_PATTERNS = [
-  /auth/i,
-  /payment/i,
-  /security/i,
-  /crypto/i,
-  /migration/i,
-  /schema/i,
-  /permission/i,
-  /secret/i,
-  /credential/i,
-  /\.env/,
-  /config\/production/i,
-];
-
-/** Paths whose diff content should NOT be sent to external APIs or persisted in plain text */
-const SENSITIVE_PATH_PATTERNS = [
-  /\.env/i,
-  /secret/i,
-  /credential/i,
-  /\.pem$/i,
-  /\.key$/i,
-  /password/i,
-  /token/i,
-  /\.netrc/i,
-  /authorized_keys/i,
-  /config\/production/i,
-];
-
-function isSensitivePath(filePath: string): boolean {
-  return SENSITIVE_PATH_PATTERNS.some((p) => p.test(filePath));
-}
-
-const RISK_CONTENT_KEYWORDS = [
-  'DELETE FROM',
-  'DROP TABLE',
-  'rm -rf',
-  'exec(',
-  'eval(',
-  'dangerouslySetInnerHTML',
-  'innerHTML',
-  'process.exit',
-  '--force',
-  'sudo ',
-];
 
 // ─── State Management (Append-only NDJSON) ────────────────
 
@@ -119,7 +81,6 @@ function getStateFilePath(sessionDir: string): string {
 function appendMutation(sessionDir: string, mutation: MutationRecord): void {
   const stateFile = getStateFilePath(sessionDir);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-  // appendFile is atomic enough for single-process sequential writes
   fs.appendFileSync(stateFile, JSON.stringify(mutation) + '\n');
 }
 
@@ -172,16 +133,14 @@ function extractMutationFromEdit(toolInput: any): MutationRecord | null {
     removed: Math.max(0, oldLines - newLines),
   };
 
-  // For replace_all, we don't know occurrence count — mark as estimated
-  // Use conservative multiplier of 1 (stats may undercount, but won't fabricate)
   const sensitive = isSensitivePath(filePath);
   const diff = sensitive
     ? `--- ${filePath}\n[REDACTED: sensitive file, +${perOccurrence.added}/-${perOccurrence.removed} lines]`
     : `--- ${filePath}\n` +
       (replaceAll ? `(replace_all: true, stats are per-occurrence estimate)\n` : '') +
       `@@ Edit @@\n` +
-      oldStr.split('\n').map((l) => `- ${l}`).join('\n') + '\n' +
-      newStr.split('\n').map((l) => `+ ${l}`).join('\n');
+      oldStr.split('\n').map((l: string) => `- ${l}`).join('\n') + '\n' +
+      newStr.split('\n').map((l: string) => `+ ${l}`).join('\n');
 
   return {
     timestamp: new Date().toISOString(),
@@ -209,18 +168,79 @@ function extractMutationFromWrite(toolInput: any, toolResponse: any): MutationRe
     ? `--- ${filePath}\n[REDACTED: sensitive file, ${lines} lines written]`
     : `--- ${filePath}\n` +
       `@@ Write (${isNewFile ? 'new file' : 'overwrite'}) @@\n` +
-      content.split('\n').map((l) => `+ ${l}`).join('\n');
+      content.split('\n').map((l: string) => `+ ${l}`).join('\n');
 
   return {
     timestamp: new Date().toISOString(),
     tool: 'Write',
     filePath,
     linesAdded: lines,
-    // For overwrites we can't know the old line count from hook data alone
     linesRemoved: 0,
     isNewFile,
     diff: truncate(diff, MAX_DIFF_CHARS),
   };
+}
+
+function extractMutationFromBash(toolInput: any, toolResponse: any): MutationRecord | null {
+  const command = String(toolInput?.command || '');
+  if (!command || !bashCommandWritesFiles(command)) return null;
+
+  const affectedPaths = extractBashAffectedPaths(command);
+  if (affectedPaths.length === 0) {
+    // Still record with generic path if we know it writes files
+    return {
+      timestamp: new Date().toISOString(),
+      tool: 'Bash',
+      filePath: '[bash file modification]',
+      linesAdded: 0,
+      linesRemoved: 0,
+      isNewFile: false,
+      diff: `--- Bash command\n$ ${command.slice(0, 500)}`,
+    };
+  }
+
+  // Create one mutation per affected path
+  // Return the first; caller handles multiple via extractMutationsFromBash
+  const firstPath = affectedPaths[0];
+  const sensitive = isSensitivePath(firstPath);
+  return {
+    timestamp: new Date().toISOString(),
+    tool: 'Bash',
+    filePath: firstPath,
+    linesAdded: 0,
+    linesRemoved: 0,
+    isNewFile: false,
+    diff: sensitive
+      ? `--- ${firstPath}\n[REDACTED: sensitive file modified via Bash]`
+      : `--- ${firstPath}\n$ ${command.slice(0, 500)}`,
+  };
+}
+
+/** Extract all mutations from a Bash command (may affect multiple files) */
+function extractMutationsFromBash(toolInput: any, toolResponse: any): MutationRecord[] {
+  const command = String(toolInput?.command || '');
+  if (!command || !bashCommandWritesFiles(command)) return [];
+
+  const affectedPaths = extractBashAffectedPaths(command);
+  if (affectedPaths.length === 0) {
+    const m = extractMutationFromBash(toolInput, toolResponse);
+    return m ? [m] : [];
+  }
+
+  return affectedPaths.map((filePath) => {
+    const sensitive = isSensitivePath(filePath);
+    return {
+      timestamp: new Date().toISOString(),
+      tool: 'Bash',
+      filePath,
+      linesAdded: 0,
+      linesRemoved: 0,
+      isNewFile: false,
+      diff: sensitive
+        ? `--- ${filePath}\n[REDACTED: sensitive file modified via Bash]`
+        : `--- ${filePath}\n$ ${command.slice(0, 500)}`,
+    };
+  });
 }
 
 // ─── Classification ────────────────────────────────────────
@@ -258,7 +278,6 @@ function classifyChanges(mutations: MutationRecord[]): ChangeClassification {
       totalRemoved += m.linesRemoved;
       if (m.isNewFile) newFiles++;
 
-      // Collect content-based risk signals (already detected in PostToolUse)
       if (m.contentRiskSignals) {
         for (const sig of m.contentRiskSignals) {
           riskSignals.push(sig);
@@ -267,13 +286,10 @@ function classifyChanges(mutations: MutationRecord[]): ChangeClassification {
       }
     }
 
-    // Check path-based risk signals
-    for (const pattern of RISK_PATH_PATTERNS) {
-      if (pattern.test(filePath)) {
-        riskSignals.push(`路径风险: ${filePath} 匹配 ${pattern}`);
-        forceReview = true;
-        break;
-      }
+    // Check path-based risk signals (use shared rules)
+    if (isRiskPath(filePath)) {
+      riskSignals.push(`路径风险: ${filePath}`);
+      forceReview = true;
     }
   }
 
@@ -322,10 +338,9 @@ function buildDiffSection(mutations: MutationRecord[]): string {
 }
 
 async function callGptReview(
+  creds: LlmCredentials,
   classification: ChangeClassification,
   mutations: MutationRecord[],
-  accessToken?: string,
-  apiKey?: string,
 ): Promise<string> {
   const riskInfo = classification.riskSignals.length > 0
     ? `\n风险信号：\n${classification.riskSignals.map(s => `  - ${s}`).join('\n')}`
@@ -363,127 +378,98 @@ ${diffContent}
 （无建议则写"无"）`;
 
   const isMajor = classification.level === 'major';
-  const model = isMajor ? 'gpt-5.4' : 'gpt-5.4-mini';
-  const reasoningEffort = isMajor ? 'high' : 'medium';
-  const timeoutMs = isMajor ? REVIEW_TIMEOUT_MAJOR_MS : REVIEW_TIMEOUT_MEDIUM_MS;
 
-  // Try Codex API first (subscription, free)
-  if (accessToken) {
-    try {
-      return await callCodexApi(prompt, accessToken, model, reasoningEffort, timeoutMs);
-    } catch {
-      // Fall through to Chat Completions
-    }
-  }
-
-  // Fallback to Chat Completions API
-  if (apiKey) {
-    return await callChatCompletionsApi(prompt, apiKey, model, reasoningEffort, timeoutMs);
-  }
-
-  throw new Error('No OpenAI credentials available for review');
+  return await callLlm(creds, {
+    prompt,
+    system: '你是代码评审者。只指出真实问题，不做风格评论。简洁回复。',
+    model: isMajor ? 'gpt-5.4' : 'gpt-5.4-mini',
+    reasoningEffort: isMajor ? 'high' : 'medium',
+    timeoutMs: isMajor ? REVIEW_TIMEOUT_MAJOR_MS : REVIEW_TIMEOUT_MEDIUM_MS,
+    retryOn429: isMajor, // Retry for major reviews
+  });
 }
 
-async function callCodexApi(prompt: string, accessToken: string, model: string, effort: string, timeoutMs: number): Promise<string> {
-  const response = await fetch(CODEX_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      model,
-      instructions: '你是代码评审者。只指出真实问题，不做风格评论。简洁回复。',
-      input: [{ role: 'user', content: prompt }],
-      reasoning: { effort },
-      stream: false,
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+// ─── Incremental Review ───────────────────────────────────
 
-  if (!response.ok) {
-    throw new Error(`Codex API ${response.status}`);
+/**
+ * Run a review on current accumulated mutations if they've reached major threshold.
+ * Returns true if review was triggered, false otherwise.
+ */
+async function tryIncrementalReview(
+  creds: LlmCredentials,
+  sessionDir: string,
+  ipcOutputDir: string,
+  chatJid: string,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  const mutations = loadMutations(sessionDir);
+  if (mutations.length === 0) return false;
+
+  const classification = classifyChanges(mutations);
+
+  // Only trigger incremental review for major changes
+  if (classification.level !== 'major') return false;
+
+  log(`[review-incremental] Triggered: ${classification.totalFiles} files, +${classification.totalLinesAdded}/-${classification.totalLinesRemoved}`);
+
+  try {
+    const reviewText = await callGptReview(creds, classification, mutations);
+    const text = `🔴 **GPT 增量评审** (重大变更: ${classification.totalFiles}文件, +${classification.totalLinesAdded}/-${classification.totalLinesRemoved})\n\n${reviewText}`;
+    writeIpcMessage(ipcOutputDir, chatJid, text);
+    log(`[review-incremental] Review completed`);
+  } catch (err) {
+    log(`[review-incremental] Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  const data = await response.json() as any;
-  if (data.output) {
-    for (const item of data.output) {
-      if (item.type === 'message' && item.content) {
-        for (const block of item.content) {
-          if (block.type === 'output_text') return block.text;
-        }
-      }
-    }
-  }
-  throw new Error('No text in Codex response');
-}
-
-async function callChatCompletionsApi(prompt: string, apiKey: string, model: string, effort: string, timeoutMs: number): Promise<string> {
-  const response = await fetch(CHAT_COMPLETIONS_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: '你是代码评审者。只指出真实问题，不做风格评论。简洁回复。' },
-        { role: 'user', content: prompt },
-      ],
-      reasoning_effort: effort,
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Chat Completions API ${response.status}`);
-  }
-
-  const data = await response.json() as any;
-  return data.choices?.[0]?.message?.content || '';
+  // Clear state after incremental review so Stop doesn't re-review
+  clearState(sessionDir);
+  return true;
 }
 
 // ─── Hook Factories ────────────────────────────────────────
 
 /**
  * Create the PostToolUse hook that collects mutations.
- * Lightweight — only appends to NDJSON state file, no API calls.
+ * Tracks Edit, Write, AND Bash commands that modify files.
+ * Triggers incremental review when changes reach major threshold.
  */
-export function createPostToolUseReviewHook(sessionDir: string): HookCallback {
+export function createPostToolUseReviewHook(
+  sessionDir: string,
+  ipcOutputDir?: string,
+  chatJid?: string,
+  log?: (msg: string) => void,
+): HookCallback {
+  const creds = getLlmCredentials();
+  let incrementalReviewPending = false;
+
   return async (input, _toolUseId, _options) => {
     const hookInput = input as PostToolUseHookInput;
     const toolName = hookInput.tool_name;
 
-    // Only track Edit and Write — NotebookEdit excluded (no structured diff available)
-    if (toolName !== 'Edit' && toolName !== 'Write') {
-      return {};
-    }
+    // Skip subagent mutations
+    if (hookInput.agent_id) return {};
 
-    // Skip subagent mutations (delegate_task has its own isolation)
-    if (hookInput.agent_id) {
-      return {};
-    }
-
-    let mutation: MutationRecord | null = null;
+    // Track Edit, Write, and file-writing Bash commands
+    let mutations: MutationRecord[] = [];
 
     if (toolName === 'Edit') {
-      mutation = extractMutationFromEdit(hookInput.tool_input);
+      const m = extractMutationFromEdit(hookInput.tool_input);
+      if (m) mutations.push(m);
     } else if (toolName === 'Write') {
-      mutation = extractMutationFromWrite(hookInput.tool_input, hookInput.tool_response);
+      const m = extractMutationFromWrite(hookInput.tool_input, hookInput.tool_response);
+      if (m) mutations.push(m);
+    } else if (toolName === 'Bash') {
+      mutations = extractMutationsFromBash(hookInput.tool_input, hookInput.tool_response);
+    } else {
+      return {};
     }
 
-    if (mutation) {
-      // Check for content-based risk signals — stored as metadata, not line inflation
+    for (const mutation of mutations) {
+      // Check content risk signals
       const toolInput = hookInput.tool_input as any;
       const content = toolInput?.new_string || toolInput?.content || '';
-      if (typeof content === 'string') {
-        const signals: string[] = [];
-        for (const keyword of RISK_CONTENT_KEYWORDS) {
-          if (content.includes(keyword)) {
-            signals.push(`内容风险: "${keyword}" in ${mutation.filePath}`);
-          }
-        }
+      if (typeof content === 'string' && content) {
+        const signals = detectContentRiskSignals(content, mutation.filePath);
         if (signals.length > 0) {
           mutation.contentRiskSignals = signals;
         }
@@ -492,13 +478,28 @@ export function createPostToolUseReviewHook(sessionDir: string): HookCallback {
       appendMutation(sessionDir, mutation);
     }
 
+    // Try incremental review if we have IPC info and haven't just done one
+    if (mutations.length > 0 && ipcOutputDir && chatJid && log && !incrementalReviewPending) {
+      incrementalReviewPending = true;
+      // Check every 5 mutations if we should trigger incremental review
+      const allMutations = loadMutations(sessionDir);
+      if (allMutations.length >= 5 && hasLlmCredentials(creds)) {
+        const triggered = await tryIncrementalReview(creds, sessionDir, ipcOutputDir, chatJid, log);
+        if (triggered) {
+          incrementalReviewPending = false;
+          return {};
+        }
+      }
+      incrementalReviewPending = false;
+    }
+
     return {};
   };
 }
 
 /**
  * Create the Stop hook that runs the Review Coordinator.
- * Reads accumulated mutations, classifies, optionally calls GPT, writes result.
+ * Reviews any remaining unreviewd mutations accumulated since last incremental review.
  */
 export function createStopReviewHook(
   sessionDir: string,
@@ -506,6 +507,8 @@ export function createStopReviewHook(
   chatJid: string,
   log: (msg: string) => void,
 ): HookCallback {
+  const creds = getLlmCredentials();
+
   return async (_input, _toolUseId, _options) => {
     const mutations = loadMutations(sessionDir);
     if (mutations.length === 0) {
@@ -521,25 +524,15 @@ export function createStopReviewHook(
       return {};
     }
 
-    // Get OpenAI credentials
-    const accessToken = process.env.CROSSMODEL_OPENAI_ACCESS_TOKEN;
-    const apiKey = process.env.CROSSMODEL_OPENAI_API_KEY;
-
-    if (!accessToken && !apiKey) {
+    if (!hasLlmCredentials(creds)) {
       log('[review-coordinator] No OpenAI credentials, skipping GPT review');
       clearState(sessionDir);
       return {};
     }
 
     try {
-      const reviewText = await callGptReview(
-        classification,
-        mutations,
-        accessToken,
-        apiKey,
-      );
+      const reviewText = await callGptReview(creds, classification, mutations);
 
-      // Write review result as IPC message for user visibility
       const levelEmoji = classification.level === 'major' ? '🔴' : '🟡';
       const levelLabel = classification.level === 'major' ? '重大' : '中等';
       const text = `${levelEmoji} **GPT 代码评审** (${levelLabel}变更: ${classification.totalFiles}文件, +${classification.totalLinesAdded}/-${classification.totalLinesRemoved})\n\n${reviewText}`;
@@ -560,7 +553,6 @@ export function createStopReviewHook(
 function writeIpcMessage(outputDir: string, chatJid: string, text: string): void {
   fs.mkdirSync(outputDir, { recursive: true });
   const filename = `review-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
-  // Use standard IPC message format so main process picks it up
   const message = {
     type: 'message',
     chatJid,

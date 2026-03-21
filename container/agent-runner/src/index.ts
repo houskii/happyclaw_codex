@@ -1094,7 +1094,7 @@ async function runQuery(
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }],
         PreToolUse: [{ hooks: [createGatekeeperHook(log)] }],
-        PostToolUse: [{ hooks: [createPostToolUseReviewHook(WORKSPACE_IPC), createLoopRecoveryHook(log)] }],
+        PostToolUse: [{ hooks: [createPostToolUseReviewHook(WORKSPACE_IPC, path.join(WORKSPACE_IPC, 'messages'), containerInput.chatJid, log), createLoopRecoveryHook(log)] }],
         Stop: [{ hooks: [createStopReviewHook(
           WORKSPACE_IPC,
           path.join(WORKSPACE_IPC, 'messages'),
