@@ -15,6 +15,7 @@ export const TaskPatchSchema = z.object({
   status: z.enum(['active', 'paused']).optional(),
   next_run: z.string().optional(),
   model: z.string().max(128).nullable().optional(),
+  notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
 });
 
 // 简单 cron 表达式验证：5 或 6 段，每段允许 * 和常见 cron 语法
@@ -31,6 +32,7 @@ export const TaskCreateSchema = z
     execution_type: z.enum(['agent', 'script']).optional(),
     script_command: z.string().max(4096).optional(),
     model: z.string().max(128).optional(),
+    notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
   })
   .superRefine((data, ctx) => {
     const execType = data.execution_type || 'agent';
@@ -607,4 +609,9 @@ export interface MemorySearchHit extends MemorySource {
 export const UserIMPreferencesSchema = z.object({
   autoCreateWorkspaceForGroups: z.boolean().optional(),
   autoCreateExecutionMode: z.enum(['host', 'container']).optional(),
+});
+
+export const WeChatConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  clearBotToken: z.boolean().optional(),
 });

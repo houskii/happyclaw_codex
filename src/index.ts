@@ -114,6 +114,7 @@ import {
   getUserFeishuConfig,
   getUserTelegramConfig,
   getUserQQConfig,
+  getUserWeChatConfig,
   getSystemSettings,
   saveUserFeishuConfig,
   saveUserTelegramConfig,
@@ -125,6 +126,7 @@ import type {
   FeishuConnectConfig,
   TelegramConnectConfig,
   QQConnectConfig,
+  WeChatConnectConfig,
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
 import { TurnManager } from './turn-manager.js';
@@ -4775,8 +4777,9 @@ async function connectUserIMChannels(
   feishuConfig?: FeishuConnectConfig | null,
   telegramConfig?: TelegramConnectConfig | null,
   qqConfig?: QQConnectConfig | null,
+  wechatConfig?: WeChatConnectConfig | null,
   ignoreMessagesBefore?: number,
-): Promise<{ feishu: boolean; telegram: boolean; qq: boolean }> {
+): Promise<{ feishu: boolean; telegram: boolean; qq: boolean; wechat: boolean }> {
   const onNewChat = buildOnNewChat(userId, homeFolder);
   const resolveGroupFolder = (chatJid: string): string | undefined => {
     return resolveEffectiveFolder(chatJid);
@@ -4790,6 +4793,7 @@ async function connectUserIMChannels(
   let feishu = false;
   let telegram = false;
   let qq = false;
+  let wechat = false;
 
   if (
     feishuConfig &&
@@ -4860,7 +4864,28 @@ async function connectUserIMChannels(
     );
   }
 
-  return { feishu, telegram, qq };
+  if (
+    wechatConfig &&
+    wechatConfig.enabled !== false &&
+    wechatConfig.botToken &&
+    wechatConfig.ilinkBotId
+  ) {
+    wechat = await imManager.connectUserWeChat(
+      userId,
+      wechatConfig,
+      onNewChat,
+      buildIsChatAuthorized(userId),
+      buildOnPairAttempt(userId),
+      {
+        onCommand: handleCommand,
+        resolveGroupFolder,
+        resolveEffectiveChatJid,
+        onAgentMessage,
+      },
+    );
+  }
+
+  return { feishu, telegram, qq, wechat };
 }
 
 function movePathWithFallback(src: string, dst: string): void {
@@ -5200,7 +5225,7 @@ async function main(): Promise<void> {
   // Reload a per-user IM channel (hot-reload on user-im config save)
   const reloadUserIMConfig = async (
     userId: string,
-    channel: 'feishu' | 'telegram' | 'qq',
+    channel: 'feishu' | 'telegram' | 'qq' | 'wechat',
   ): Promise<boolean> => {
     const homeGroup = getUserHomeGroup(userId);
     if (!homeGroup) {
@@ -5282,8 +5307,7 @@ async function main(): Promise<void> {
       }
       logger.info({ userId }, 'User Telegram channel disabled via hot-reload');
       return false;
-    } else {
-      // QQ
+    } else if (channel === 'qq') {
       await imManager.disconnectUserQQ(userId);
       const config = getUserQQConfig(userId);
       if (
@@ -5311,6 +5335,44 @@ async function main(): Promise<void> {
         return connected;
       }
       logger.info({ userId }, 'User QQ channel disabled via hot-reload');
+      return false;
+    } else {
+      // WeChat
+      await imManager.disconnectUserWeChat(userId);
+      const config = getUserWeChatConfig(userId);
+      if (
+        config &&
+        config.enabled !== false &&
+        config.botToken &&
+        config.ilinkBotId
+      ) {
+        const connected = await imManager.connectUserWeChat(
+          userId,
+          {
+            botToken: config.botToken,
+            ilinkBotId: config.ilinkBotId,
+            baseUrl: config.baseUrl,
+            cdnBaseUrl: config.cdnBaseUrl,
+            getUpdatesBuf: config.getUpdatesBuf,
+          },
+          onNewChat,
+          buildIsChatAuthorized(userId),
+          buildOnPairAttempt(userId),
+          {
+            onCommand: handleCommand,
+            resolveGroupFolder: (chatJid: string) =>
+              resolveEffectiveFolder(chatJid),
+            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+            onAgentMessage: buildOnAgentMessage(),
+          },
+        );
+        logger.info(
+          { userId, connected },
+          'User WeChat connection hot-reloaded',
+        );
+        return connected;
+      }
+      logger.info({ userId }, 'User WeChat channel disabled via hot-reload');
       return false;
     }
   };
@@ -5344,6 +5406,8 @@ async function main(): Promise<void> {
     isUserTelegramConnected: (userId: string) =>
       imManager.isTelegramConnected(userId),
     isUserQQConnected: (userId: string) => imManager.isQQConnected(userId),
+    isUserWeChatConnected: (userId: string) =>
+      imManager.isWeChatConnected(userId),
     processAgentConversation,
     getFeishuChatInfo: (userId: string, chatId: string) =>
       imManager.getFeishuChatInfo(userId, chatId),
@@ -5594,6 +5658,7 @@ async function main(): Promise<void> {
     const userFeishu = getUserFeishuConfig(user.id);
     const userTelegram = getUserTelegramConfig(user.id);
     const userQQ = getUserQQConfig(user.id);
+    const userWeChat = getUserWeChatConfig(user.id);
 
     // Determine effective Feishu config: per-user > global (admin only)
     let effectiveFeishu: FeishuConnectConfig | null = null;
@@ -5642,7 +5707,20 @@ async function main(): Promise<void> {
       };
     }
 
-    if (!effectiveFeishu && !effectiveTelegram && !effectiveQQ) continue;
+    // Determine effective WeChat config: per-user only (no global fallback)
+    let effectiveWeChat: WeChatConnectConfig | null = null;
+    if (userWeChat && userWeChat.botToken && userWeChat.ilinkBotId) {
+      effectiveWeChat = {
+        botToken: userWeChat.botToken,
+        ilinkBotId: userWeChat.ilinkBotId,
+        baseUrl: userWeChat.baseUrl,
+        cdnBaseUrl: userWeChat.cdnBaseUrl,
+        getUpdatesBuf: userWeChat.getUpdatesBuf,
+        enabled: userWeChat.enabled,
+      };
+    }
+
+    if (!effectiveFeishu && !effectiveTelegram && !effectiveQQ && !effectiveWeChat) continue;
 
     try {
       const result = await connectUserIMChannels(
@@ -5651,6 +5729,7 @@ async function main(): Promise<void> {
         effectiveFeishu,
         effectiveTelegram,
         effectiveQQ,
+        effectiveWeChat,
       );
       if (result.feishu) anyFeishuConnected = true;
       logger.info(
@@ -5659,6 +5738,7 @@ async function main(): Promise<void> {
           feishu: result.feishu,
           telegram: result.telegram,
           qq: result.qq,
+          wechat: result.wechat,
         },
         'User IM channels connected',
       );

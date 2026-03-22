@@ -26,6 +26,7 @@ import {
   TelegramConfigSchema,
   QQConfigSchema,
   ImGeneralConfigSchema,
+  WeChatConfigSchema,
   RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
@@ -71,6 +72,8 @@ import {
   saveUserQQConfig,
   getUserImGeneralConfig,
   saveUserImGeneralConfig,
+  getUserWeChatConfig,
+  saveUserWeChatConfig,
   updateAllSessionCredentials,
   detectLocalClaudeCode,
   importLocalClaudeCredentials,
@@ -108,12 +111,14 @@ const configRoutes = new Hono<{ Variables: Variables }>();
  */
 function countOtherEnabledImChannels(
   userId: string,
-  excludeChannel: 'feishu' | 'telegram' | 'qq',
+  excludeChannel: 'feishu' | 'telegram' | 'qq' | 'wechat',
 ): number {
   let count = 0;
   if (excludeChannel !== 'feishu' && getUserFeishuConfig(userId)?.enabled)
     count++;
   if (excludeChannel !== 'telegram' && getUserTelegramConfig(userId)?.enabled)
+    count++;
+  if (excludeChannel !== 'wechat' && getUserWeChatConfig(userId)?.enabled)
     count++;
   if (excludeChannel !== 'qq' && getUserQQConfig(userId)?.enabled) count++;
   return count;
@@ -1369,6 +1374,7 @@ configRoutes.get('/user-im/status', authMiddleware, (c) => {
     feishu: deps?.isUserFeishuConnected?.(user.id) ?? false,
     telegram: deps?.isUserTelegramConnected?.(user.id) ?? false,
     qq: deps?.isUserQQConnected?.(user.id) ?? false,
+    wechat: deps?.isUserWeChatConnected?.(user.id) ?? false,
   });
 });
 
@@ -2163,6 +2169,365 @@ configRoutes.put('/user-im/general', authMiddleware, async (c) => {
   const saved = saveUserImGeneralConfig(user.id, parsed.data);
   return c.json(saved);
 });
+
+
+// ─── Per-user WeChat IM config ──────────────────────────────────
+
+const WECHAT_API_BASE = 'https://ilinkai.weixin.qq.com';
+const WECHAT_QR_BOT_TYPE = '3';
+
+function randomWechatUin(): string {
+  const uint32 = randomBytes(4).readUInt32BE(0);
+  return Buffer.from(String(uint32), 'utf-8').toString('base64');
+}
+
+function maskBotToken(token: string | undefined): string | null {
+  if (!token) return null;
+  if (token.length <= 8) return '***';
+  return token.slice(0, 4) + '***' + token.slice(-4);
+}
+
+configRoutes.get('/user-im/wechat', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const config = getUserWeChatConfig(user.id);
+    const connected = deps?.isUserWeChatConnected?.(user.id) ?? false;
+    if (!config) {
+      return c.json({
+        ilinkBotId: '',
+        hasBotToken: false,
+        botTokenMasked: null,
+        enabled: false,
+        updatedAt: null,
+        connected,
+      });
+    }
+    return c.json({
+      ilinkBotId: config.ilinkBotId || '',
+      hasBotToken: !!config.botToken,
+      botTokenMasked: maskBotToken(config.botToken),
+      enabled: config.enabled ?? false,
+      updatedAt: config.updatedAt,
+      connected,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load user WeChat config');
+    return c.json({ error: 'Failed to load user WeChat config' }, 500);
+  }
+});
+
+configRoutes.put('/user-im/wechat', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const validation = WeChatConfigSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+
+  // Billing: check IM channel limit when enabling
+  if (validation.data.enabled === true && isBillingEnabled()) {
+    const currentWc = getUserWeChatConfig(user.id);
+    if (!currentWc?.enabled) {
+      const limit = checkImChannelLimit(
+        user.id,
+        user.role,
+        countOtherEnabledImChannels(user.id, 'wechat'),
+      );
+      if (!limit.allowed) {
+        return c.json({ error: limit.reason }, 403);
+      }
+    }
+  }
+
+  const current = getUserWeChatConfig(user.id);
+  const next = {
+    botToken: current?.botToken || '',
+    ilinkBotId: current?.ilinkBotId || '',
+    baseUrl: current?.baseUrl,
+    cdnBaseUrl: current?.cdnBaseUrl,
+    getUpdatesBuf: current?.getUpdatesBuf,
+    enabled: current?.enabled ?? false,
+  };
+
+  if (validation.data.clearBotToken === true) {
+    next.botToken = '';
+    next.ilinkBotId = '';
+  }
+  if (typeof validation.data.enabled === 'boolean') {
+    next.enabled = validation.data.enabled;
+  }
+
+  try {
+    const saved = saveUserWeChatConfig(user.id, next);
+
+    // Hot-reload: reconnect user's WeChat channel
+    if (deps?.reloadUserIMConfig) {
+      try {
+        await deps.reloadUserIMConfig(user.id, 'wechat');
+      } catch (err) {
+        logger.warn(
+          { err, userId: user.id },
+          'Failed to hot-reload user WeChat connection',
+        );
+      }
+    }
+
+    const connected = deps?.isUserWeChatConnected?.(user.id) ?? false;
+    return c.json({
+      ilinkBotId: saved.ilinkBotId || '',
+      hasBotToken: !!saved.botToken,
+      botTokenMasked: maskBotToken(saved.botToken),
+      enabled: saved.enabled ?? false,
+      updatedAt: saved.updatedAt,
+      connected,
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Invalid WeChat config payload';
+    logger.warn({ err }, 'Invalid user WeChat config payload');
+    return c.json({ error: message }, 400);
+  }
+});
+
+// Generate QR code for WeChat iLink login
+configRoutes.post('/user-im/wechat/qrcode', authMiddleware, async (c) => {
+  try {
+    const url = `${WECHAT_API_BASE}/ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(WECHAT_QR_BOT_TYPE)}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      logger.error(
+        { status: res.status, body },
+        'WeChat QR code fetch failed',
+      );
+      return c.json(
+        { error: `Failed to fetch QR code: ${res.status}` },
+        502,
+      );
+    }
+    const data = (await res.json()) as {
+      qrcode?: string;
+      qrcode_img_content?: string;
+    };
+    if (!data.qrcode) {
+      return c.json({ error: 'No QR code in response' }, 502);
+    }
+    return c.json({
+      qrcode: data.qrcode,
+      qrcodeUrl: data.qrcode_img_content || '',
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to generate QR code';
+    logger.error({ err }, 'WeChat QR code generation failed');
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Poll QR code scan status
+configRoutes.get(
+  '/user-im/wechat/qrcode-status',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const qrcode = c.req.query('qrcode');
+    if (!qrcode) {
+      return c.json({ error: 'qrcode query parameter required' }, 400);
+    }
+
+    try {
+      const url = `${WECHAT_API_BASE}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
+      const headers: Record<string, string> = {
+        'iLink-App-ClientVersion': '1',
+      };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 35000);
+      let res: Response;
+      try {
+        res = await fetch(url, { headers, signal: controller.signal });
+        clearTimeout(timer);
+      } catch (err) {
+        clearTimeout(timer);
+        if (
+          err instanceof Error &&
+          err.name === 'AbortError'
+        ) {
+          return c.json({ status: 'wait' });
+        }
+        throw err;
+      }
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        return c.json(
+          { error: `QR status poll failed: ${res.status}`, body },
+          502,
+        );
+      }
+
+      const data = (await res.json()) as {
+        status?: 'wait' | 'scaned' | 'confirmed' | 'expired';
+        bot_token?: string;
+        ilink_bot_id?: string;
+        baseurl?: string;
+        ilink_user_id?: string;
+      };
+
+      if (data.status === 'confirmed' && data.bot_token && data.ilink_bot_id) {
+        // Auto-save credentials and connect
+        const saved = saveUserWeChatConfig(user.id, {
+          botToken: data.bot_token,
+          ilinkBotId: data.ilink_bot_id.replace(/[^a-zA-Z0-9@._-]/g, ''),
+          baseUrl: data.baseurl || undefined,
+          enabled: true,
+        });
+
+        // Note: ilink_user_id (the QR scanner) is NOT auto-paired here.
+        // The scanner needs to send a message to the bot and use /pair <code>
+        // to complete pairing, same as QQ/Telegram flow.
+        // This ensures proper group registration via buildOnNewChat/registerGroup.
+
+        // Hot-reload: connect WeChat
+        if (deps?.reloadUserIMConfig) {
+          try {
+            await deps.reloadUserIMConfig(user.id, 'wechat');
+          } catch (err) {
+            logger.warn(
+              { err, userId: user.id },
+              'Failed to hot-reload WeChat after QR login',
+            );
+          }
+        }
+
+        return c.json({
+          status: 'confirmed',
+          ilinkBotId: saved.ilinkBotId,
+        });
+      }
+
+      return c.json({
+        status: data.status || 'wait',
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'QR status poll failed';
+      logger.error({ err }, 'WeChat QR status poll failed');
+      return c.json({ error: message }, 500);
+    }
+  },
+);
+
+// Disconnect WeChat and clear token
+configRoutes.post('/user-im/wechat/disconnect', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const current = getUserWeChatConfig(user.id);
+    if (current) {
+      saveUserWeChatConfig(user.id, {
+        botToken: '',
+        ilinkBotId: '',
+        enabled: false,
+        getUpdatesBuf: current.getUpdatesBuf,
+      });
+    }
+
+    // Disconnect
+    if (deps?.reloadUserIMConfig) {
+      try {
+        await deps.reloadUserIMConfig(user.id, 'wechat');
+      } catch (err) {
+        logger.warn(
+          { err, userId: user.id },
+          'Failed to disconnect WeChat',
+        );
+      }
+    }
+
+    return c.json({ success: true });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to disconnect WeChat';
+    logger.error({ err }, 'WeChat disconnect failed');
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Generate pairing code for WeChat
+configRoutes.post(
+  '/user-im/wechat/pairing-code',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const config = getUserWeChatConfig(user.id);
+    if (!config?.botToken) {
+      return c.json(
+        { error: 'WeChat not configured. Please scan QR code first.' },
+        400,
+      );
+    }
+
+    try {
+      const { generatePairingCode } = await import('../telegram-pairing.js');
+      const result = generatePairingCode(user.id);
+      return c.json(result);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Failed to generate pairing code';
+      logger.warn({ err }, 'Failed to generate WeChat pairing code');
+      return c.json({ error: message }, 500);
+    }
+  },
+);
+
+// List WeChat paired chats for the current user
+configRoutes.get('/user-im/wechat/paired-chats', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const groups = (deps?.getRegisteredGroups() ?? {}) as Record<
+    string,
+    { name: string; added_at: string; created_by?: string }
+  >;
+  const chats: Array<{ jid: string; name: string; addedAt: string }> = [];
+  for (const [jid, group] of Object.entries(groups)) {
+    if (jid.startsWith('wechat:') && group.created_by === user.id) {
+      chats.push({ jid, name: group.name, addedAt: group.added_at });
+    }
+  }
+  return c.json({ chats });
+});
+
+// Remove (unpair) a WeChat chat
+configRoutes.delete(
+  '/user-im/wechat/paired-chats/:jid',
+  authMiddleware,
+  (c) => {
+    const user = c.get('user') as AuthUser;
+    const jid = decodeURIComponent(c.req.param('jid'));
+
+    if (!jid.startsWith('wechat:')) {
+      return c.json({ error: 'Invalid WeChat chat JID' }, 400);
+    }
+
+    const groups = deps?.getRegisteredGroups() ?? {};
+    const group = groups[jid];
+    if (!group) {
+      return c.json({ error: 'Chat not found' }, 404);
+    }
+    if (group.created_by !== user.id) {
+      return c.json({ error: 'Not authorized to remove this chat' }, 403);
+    }
+
+    deleteRegisteredGroup(jid);
+    deleteChatHistory(jid);
+    delete groups[jid];
+    logger.info({ jid, userId: user.id }, 'WeChat chat unpaired');
+    return c.json({ success: true });
+  },
+);
 
 // ─── IM Binding management (bindings panoramic page) ────────────
 

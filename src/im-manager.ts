@@ -14,10 +14,12 @@ import {
   createFeishuChannel,
   createTelegramChannel,
   createQQChannel,
+  createWeChatChannel,
 } from './im-channel.js';
 import type { FeishuConnectionConfig } from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
+import type { WeChatConnectionConfig } from './wechat.js';
 import type { StreamingCardController } from './feishu-streaming-card.js';
 import { ProgressCardController } from './feishu-progress-card.js';
 import { getRegisteredGroup, getJidsByFolder } from './db.js';
@@ -43,6 +45,15 @@ export interface TelegramConnectConfig {
 export interface QQConnectConfig {
   appId: string;
   appSecret: string;
+  enabled?: boolean;
+}
+
+export interface WeChatConnectConfig {
+  botToken: string;
+  ilinkBotId: string;
+  baseUrl?: string;
+  cdnBaseUrl?: string;
+  getUpdatesBuf?: string;
   enabled?: boolean;
 }
 
@@ -470,6 +481,59 @@ class IMConnectionManager {
   }
 
   /**
+   * Connect a WeChat iLink instance for a specific user.
+   */
+  async connectUserWeChat(
+    userId: string,
+    config: WeChatConnectConfig,
+    onNewChat: (chatJid: string, chatName: string) => void,
+    isChatAuthorized?: (jid: string) => boolean,
+    onPairAttempt?: (
+      jid: string,
+      chatName: string,
+      code: string,
+    ) => Promise<boolean>,
+    options?: {
+      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      resolveGroupFolder?: (jid: string) => string | undefined;
+      resolveEffectiveChatJid?: (
+        chatJid: string,
+      ) => { effectiveJid: string; agentId: string | null } | null;
+      onAgentMessage?: (baseChatJid: string, agentId: string) => void;
+    },
+  ): Promise<boolean> {
+    if (!config.botToken || !config.ilinkBotId) {
+      logger.info({ userId }, 'WeChat config empty, skipping connection');
+      return false;
+    }
+
+    const channel = createWeChatChannel({
+      botToken: config.botToken,
+      ilinkBotId: config.ilinkBotId,
+      baseUrl: config.baseUrl,
+      cdnBaseUrl: config.cdnBaseUrl,
+      getUpdatesBuf: config.getUpdatesBuf,
+    });
+
+    return this.connectChannel(userId, 'wechat', channel, {
+      onReady: () => {
+        logger.info({ userId }, 'User WeChat bot connected');
+      },
+      onNewChat,
+      isChatAuthorized,
+      onPairAttempt,
+      onCommand: options?.onCommand,
+      resolveGroupFolder: options?.resolveGroupFolder,
+      resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
+      onAgentMessage: options?.onAgentMessage,
+    });
+  }
+
+  async disconnectUserWeChat(userId: string): Promise<void> {
+    await this.disconnectChannel(userId, 'wechat');
+  }
+
+  /**
    * Send a message to a Feishu chat.
    * @deprecated Use sendMessage(jid, text) which auto-routes.
    */
@@ -578,6 +642,19 @@ class IMConnectionManager {
   isAnyQQConnected(): boolean {
     for (const conn of this.connections.values()) {
       if (conn.channels.get('qq')?.isConnected()) return true;
+    }
+    return false;
+  }
+
+  isWeChatConnected(userId: string): boolean {
+    const conn = this.connections.get(userId);
+    return conn?.channels.get('wechat')?.isConnected() ?? false;
+  }
+
+  /** Check if any user has an active WeChat connection */
+  isAnyWeChatConnected(): boolean {
+    for (const conn of this.connections.values()) {
+      if (conn.channels.get('wechat')?.isConnected()) return true;
     }
     return false;
   }

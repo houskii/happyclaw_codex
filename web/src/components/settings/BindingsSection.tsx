@@ -9,7 +9,7 @@ import { BindingTargetDialog } from './BindingTargetDialog';
 import type { AvailableImGroup } from '../../types';
 import type { BindingTarget } from './hooks/useImBindings';
 
-type ChannelFilter = 'all' | 'feishu' | 'telegram' | 'qq';
+type ChannelFilter = 'all' | 'feishu' | 'telegram' | 'qq' | 'wechat';
 
 export function BindingsSection() {
   const { bindings, loading, targets, targetsLoading, reload, rebind, error: hookError, clearError: clearHookError } = useImBindings();
@@ -30,6 +30,7 @@ export function BindingsSection() {
     if (types.has('feishu')) all.push({ key: 'feishu', label: '飞书' });
     if (types.has('telegram')) all.push({ key: 'telegram', label: 'Telegram' });
     if (types.has('qq')) all.push({ key: 'qq', label: 'QQ' });
+    if (types.has('wechat')) all.push({ key: 'wechat', label: '微信' });
     return all;
   }, [bindings]);
 

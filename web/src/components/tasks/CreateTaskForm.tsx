@@ -35,6 +35,13 @@ interface CreateTaskFormProps {
   isAdmin?: boolean;
 }
 
+const CHANNEL_OPTIONS = [
+  { key: 'feishu', label: '飞书' },
+  { key: 'telegram', label: 'Telegram' },
+  { key: 'qq', label: 'QQ' },
+  { key: 'wechat', label: '微信' },
+] as const;
+
 const INTERVAL_UNITS = [
   { label: '秒', ms: 1000 },
   { label: '分钟', ms: 60 * 1000 },

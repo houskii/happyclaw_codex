@@ -6,12 +6,14 @@ const CHANNEL_LABEL: Record<string, string> = {
   feishu: '飞书',
   telegram: 'Telegram',
   qq: 'QQ',
+  wechat: '微信',
 };
 
 const CHANNEL_COLORS: Record<string, string> = {
   feishu: 'bg-blue-100 text-blue-700',
   telegram: 'bg-sky-100 text-sky-700',
   qq: 'bg-purple-100 text-purple-700',
+  wechat: 'bg-green-100 text-green-700',
 };
 
 interface ImBindingRowProps {

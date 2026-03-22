@@ -2753,6 +2753,127 @@ export function saveUserImGeneralConfig(
   return config;
 }
 
+// ========== WeChat User IM Config ==========
+
+export interface UserWeChatConfig {
+  botToken: string; // iLink bot_token
+  ilinkBotId: string; // bot ID (xxx@im.bot)
+  baseUrl?: string; // 默认 https://ilinkai.weixin.qq.com
+  cdnBaseUrl?: string; // 默认 https://novac2c.cdn.weixin.qq.com/c2c
+  getUpdatesBuf?: string; // 长轮询游标
+  enabled?: boolean;
+  updatedAt: string | null;
+}
+
+interface StoredWeChatProviderConfigV1 {
+  version: 1;
+  ilinkBotId: string;
+  baseUrl?: string;
+  cdnBaseUrl?: string;
+  getUpdatesBuf?: string;
+  enabled?: boolean;
+  updatedAt: string;
+  secret: EncryptedSecrets;
+}
+
+interface WeChatSecretPayload {
+  botToken: string;
+}
+
+function encryptWeChatSecret(payload: WeChatSecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptWeChatSecret(secrets: EncryptedSecrets): WeChatSecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+  const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+  return {
+    botToken: normalizeSecret(parsed.botToken ?? '', 'botToken'),
+  };
+}
+
+export function getUserWeChatConfig(userId: string): UserWeChatConfig | null {
+  const filePath = path.join(userImDir(userId), 'wechat.json');
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (parsed.version !== 1) return null;
+
+    const stored = parsed as unknown as StoredWeChatProviderConfigV1;
+    const secret = decryptWeChatSecret(stored.secret);
+    return {
+      botToken: secret.botToken,
+      ilinkBotId: ((stored.ilinkBotId as string) ?? '').trim(),
+      baseUrl: stored.baseUrl,
+      cdnBaseUrl: stored.cdnBaseUrl,
+      getUpdatesBuf: stored.getUpdatesBuf,
+      enabled: stored.enabled,
+      updatedAt: stored.updatedAt || null,
+    };
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user WeChat config');
+    return null;
+  }
+}
+
+export function saveUserWeChatConfig(
+  userId: string,
+  next: Omit<UserWeChatConfig, 'updatedAt'>,
+): UserWeChatConfig {
+  const normalized: UserWeChatConfig = {
+    botToken: normalizeSecret(next.botToken, 'botToken'),
+    ilinkBotId: (next.ilinkBotId ?? '').trim(),
+    baseUrl: next.baseUrl?.trim() || undefined,
+    cdnBaseUrl: next.cdnBaseUrl?.trim() || undefined,
+    getUpdatesBuf: next.getUpdatesBuf,
+    enabled: next.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredWeChatProviderConfigV1 = {
+    version: 1,
+    ilinkBotId: normalized.ilinkBotId,
+    baseUrl: normalized.baseUrl,
+    cdnBaseUrl: normalized.cdnBaseUrl,
+    getUpdatesBuf: normalized.getUpdatesBuf,
+    enabled: normalized.enabled,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptWeChatSecret({ botToken: normalized.botToken }),
+  };
+
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'wechat.json');
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, filePath);
+  return normalized;
+}
+
 // ─── System settings (plain JSON, no encryption) ─────────────────
 
 const SYSTEM_SETTINGS_FILE = path.join(
