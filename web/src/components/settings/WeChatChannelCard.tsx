@@ -6,9 +6,6 @@ import { ToggleSwitch } from '@/components/ui/toggle-switch';
 import { api } from '../../api/client';
 import type { SettingsNotification } from './types';
 import { getErrorMessage } from './types';
-import { usePairingCode } from './hooks/usePairingCode';
-import { usePairedChats } from './hooks/usePairedChats';
-import { PairingSection } from './PairingSection';
 import { WeChatQRDialog } from './WeChatQRDialog';
 
 interface UserWeChatConfig {
@@ -31,17 +28,6 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
 
   const enabled = config?.enabled ?? false;
 
-  const pairing = usePairingCode({
-    endpoint: '/api/config/user-im/wechat/pairing-code',
-    setNotice,
-    setError,
-  });
-  const paired = usePairedChats({
-    endpoint: '/api/config/user-im/wechat/paired-chats',
-    setNotice,
-    setError,
-  });
-
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
@@ -56,8 +42,7 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
 
   useEffect(() => {
     loadConfig();
-    paired.load();
-  }, [loadConfig, paired.load]);
+  }, [loadConfig]);
 
   const handleToggle = async (newEnabled: boolean) => {
     setToggling(true);
@@ -151,14 +136,6 @@ export function WeChatChannelCard({ setNotice, setError }: WeChatChannelCardProp
                 </div>
               )}
 
-              {/* Pairing section — shown when connected */}
-              {config?.connected && (
-                <PairingSection
-                  channelName="微信"
-                  pairing={pairing}
-                  paired={paired}
-                />
-              )}
             </>
           )}
         </div>

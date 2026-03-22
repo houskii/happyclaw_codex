@@ -573,7 +573,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           const agent = agents.find((a) => a.id === id);
           if (agent?.linked_im_groups && agent.linked_im_groups.length > 0) {
             const names = agent.linked_im_groups.map((g) => g.name).join('、');
-            alert(`该对话已绑定 IM 群组（${names}），请先解绑后再删除。`);
+            alert(`该对话已绑定 IM 渠道（${names}），请先解绑后再删除。`);
             setBindingAgentId(id);
             return;
           }

@@ -495,8 +495,6 @@ export function createWeChatChannel(
         await inner.connect({
           onReady: opts.onReady,
           onNewChat: opts.onNewChat,
-          isChatAuthorized: opts.isChatAuthorized ?? (() => true),
-          onPairAttempt: opts.onPairAttempt,
           onCommand: opts.onCommand,
           ignoreMessagesBefore: opts.ignoreMessagesBefore,
           resolveGroupFolder: opts.resolveGroupFolder,

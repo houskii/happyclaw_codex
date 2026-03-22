@@ -4874,8 +4874,6 @@ async function connectUserIMChannels(
       userId,
       wechatConfig,
       onNewChat,
-      buildIsChatAuthorized(userId),
-      buildOnPairAttempt(userId),
       {
         onCommand: handleCommand,
         resolveGroupFolder,
@@ -5356,8 +5354,6 @@ async function main(): Promise<void> {
             getUpdatesBuf: config.getUpdatesBuf,
           },
           onNewChat,
-          buildIsChatAuthorized(userId),
-          buildOnPairAttempt(userId),
           {
             onCommand: handleCommand,
             resolveGroupFolder: (chatJid: string) =>

@@ -12,7 +12,6 @@
  * CDN URL:  https://novac2c.cdn.weixin.qq.com/c2c
  */
 import crypto from 'crypto';
-import https from 'node:https';
 import {
   storeChatMetadata,
   storeMessageDirect,
@@ -40,11 +39,9 @@ const DEFAULT_LONGPOLL_TIMEOUT_MS = 35000;
 const RECONNECT_MIN_DELAY_MS = 3000;
 const RECONNECT_MAX_DELAY_MS = 60000;
 
-const REJECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min between rejection messages
-
 const IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024; // 5 MB for inline base64
 
-const CHANNEL_VERSION = '1.0.0';
+const CHANNEL_VERSION = '0.1.0';
 
 // iLink message types
 // const MESSAGE_TYPE_USER = 1;
@@ -78,13 +75,7 @@ export interface WeChatConnectionConfig {
 export interface WeChatConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
-  isChatAuthorized: (jid: string) => boolean;
   ignoreMessagesBefore?: number;
-  onPairAttempt?: (
-    jid: string,
-    chatName: string,
-    code: string,
-  ) => Promise<boolean>;
   onCommand?: (chatJid: string, command: string) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
@@ -136,7 +127,7 @@ interface CDNMedia {
 }
 
 interface GetUpdatesResponse {
-  ret: number;
+  ret?: number;
   msgs?: WeixinMessage[];
   get_updates_buf?: string;
   longpolling_timeout_ms?: number;
@@ -220,16 +211,6 @@ function splitTextChunks(text: string, limit: number): string[] {
 }
 
 /**
- * Extract the WeChat user ID from a JID (strip the "wechat:" prefix).
- */
-function parseWeChatUserId(jid: string): string | null {
-  if (jid.startsWith('wechat:')) {
-    return jid.slice(7); // "wechat:".length === 7
-  }
-  return null;
-}
-
-/**
  * Extract text content from message item_list.
  * Includes voice-to-text transcription and fallback labels for non-text items.
  */
@@ -277,7 +258,6 @@ export function createWeChatConnection(
 ): WeChatConnection {
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
   const cdnBaseUrl = config.cdnBaseUrl || DEFAULT_CDN_BASE_URL;
-  const wechatUin = randomWechatUin();
 
   // Polling state
   let currentGetUpdatesBuf = config.getUpdatesBuf || '';
@@ -291,9 +271,6 @@ export function createWeChatConnection(
 
   // Message deduplication: key -> timestamp
   const msgCache = new Map<string, number>();
-
-  // Rate-limit rejection messages for unauthorized chats
-  const rejectTimestamps = new Map<string, number>();
 
   // ─── Deduplication ────────────────────────────────────────
 
@@ -324,7 +301,7 @@ export function createWeChatConnection(
       'Content-Type': 'application/json',
       AuthorizationType: 'ilink_bot_token',
       Authorization: `Bearer ${config.botToken}`,
-      'X-WECHAT-UIN': wechatUin,
+      'X-WECHAT-UIN': randomWechatUin(),
     };
   }
 
@@ -333,9 +310,9 @@ export function createWeChatConnection(
   }
 
   /**
-   * Make an HTTPS POST request to the iLink API.
+   * Make an HTTPS POST request to the iLink API using fetch.
    */
-  function apiPost<T = any>(
+  async function apiPost<T = any>(
     endpoint: string,
     body: Record<string, unknown>,
     timeoutMs?: number,
@@ -344,47 +321,38 @@ export function createWeChatConnection(
     const url = new URL(endpoint, baseUrl);
     const headers = buildHeaders();
 
-    return new Promise<T>((resolve, reject) => {
-      const req = https.request(
-        {
-          hostname: url.hostname,
-          path: url.pathname + url.search,
-          method: 'POST',
-          headers: {
-            ...headers,
-            'Content-Length': String(Buffer.byteLength(bodyStr)),
-          },
-          timeout: timeoutMs,
-        },
-        (res) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const text = Buffer.concat(chunks).toString('utf-8');
-            try {
-              const data = JSON.parse(text);
-              resolve(data as T);
-            } catch {
-              reject(
-                new Error(
-                  `WeChat API ${endpoint} invalid JSON: ${text.slice(0, 200)}`,
-                ),
-              );
-            }
-          });
-          res.on('error', reject);
-        },
-      );
+    const controller = new AbortController();
+    const timer = timeoutMs
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : undefined;
 
-      req.on('error', reject);
-      if (timeoutMs) {
-        req.on('timeout', () => {
-          req.destroy(new Error(`WeChat API ${endpoint} timed out`));
-        });
+    try {
+      const res = await fetch(url.toString(), {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Length': String(Buffer.byteLength(bodyStr, 'utf-8')),
+        },
+        body: bodyStr,
+        signal: controller.signal,
+      });
+
+      const text = await res.text();
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        throw new Error(
+          `WeChat API ${endpoint} invalid JSON: ${text.slice(0, 200)}`,
+        );
       }
-      req.write(bodyStr);
-      req.end();
-    });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`WeChat API ${endpoint} timed out`);
+      }
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // ─── API Methods ──────────────────────────────────────────
@@ -593,49 +561,7 @@ export function createWeChatConnection(
       // Extract text content
       let content = msg.item_list ? extractTextContent(msg.item_list) : '';
 
-      // ── /pair <code> command ──
-      const pairMatch = content.match(/^\/pair\s+(\S+)/i);
-      if (pairMatch && opts.onPairAttempt) {
-        const code = pairMatch[1];
-        try {
-          const success = await opts.onPairAttempt(jid, chatName, code);
-          const reply = success
-            ? '配对成功！此聊天已连接到你的账号。'
-            : '配对码无效或已过期，请在 Web 设置页重新生成。';
-          const ct = contextTokenCache.get(fromUserId);
-          if (ct) {
-            await sendMessageApi(fromUserId, ct, reply);
-          }
-        } catch (err) {
-          logger.error({ err, jid }, 'WeChat pair attempt error');
-          const ct = contextTokenCache.get(fromUserId);
-          if (ct) {
-            await sendMessageApi(fromUserId, ct, '配对失败，请稍后重试。');
-          }
-        }
-        return;
-      }
-
-      // ── Authorization check ──
-      if (!opts.isChatAuthorized(jid)) {
-        const now = Date.now();
-        const lastReject = rejectTimestamps.get(jid) ?? 0;
-        if (now - lastReject >= REJECT_COOLDOWN_MS) {
-          rejectTimestamps.set(jid, now);
-          const ct = contextTokenCache.get(fromUserId);
-          if (ct) {
-            await sendMessageApi(
-              fromUserId,
-              ct,
-              '此聊天尚未配对。请发送 /pair <code> 进行配对。\n' +
-                '你可以在 Web 设置页生成配对码。',
-            );
-          }
-        }
-        return;
-      }
-
-      // ── Authorized: process message ──
+      // ── Auto-register chat (WeChat is 1:1 bound, no pairing needed) ──
       const nowIso = new Date().toISOString();
       storeChatMetadata(jid, nowIso);
       updateChatName(jid, chatName);
@@ -792,10 +718,10 @@ export function createWeChatConnection(
           break;
         }
 
-        if (response.ret !== 0) {
+        // ret is absent (undefined) when the request succeeds — treat as 0
+        if (response.ret !== undefined && response.ret !== 0) {
           logger.warn(
-            { ret: response.ret },
-            'WeChat getUpdates returned non-zero ret',
+            `WeChat getUpdates error: ret=${response.ret}, response=${JSON.stringify(response).slice(0, 500)}`,
           );
           // Back off on errors
           await sleep(reconnectDelay);
@@ -854,7 +780,6 @@ export function createWeChatConnection(
       connected = true;
       msgCache.clear();
       contextTokenCache.clear();
-      rejectTimestamps.clear();
 
       logger.info(
         { baseUrl, ilinkBotId: config.ilinkBotId },
@@ -887,7 +812,6 @@ export function createWeChatConnection(
 
       msgCache.clear();
       contextTokenCache.clear();
-      rejectTimestamps.clear();
       logger.info('WeChat iLink bot disconnected');
     },
 
@@ -896,11 +820,8 @@ export function createWeChatConnection(
       text: string,
       _localImagePaths?: string[],
     ): Promise<void> {
-      const userId = parseWeChatUserId(chatId);
-      if (!userId) {
-        logger.error({ chatId }, 'Invalid WeChat chat ID format');
-        return;
-      }
+      // chatId is the raw WeChat user ID (prefix already stripped by IM manager)
+      const userId = chatId;
 
       const contextToken = contextTokenCache.get(userId);
       if (!contextToken) {
@@ -927,8 +848,8 @@ export function createWeChatConnection(
     },
 
     async sendTyping(chatId: string, isTyping: boolean): Promise<void> {
-      const userId = parseWeChatUserId(chatId);
-      if (!userId) return;
+      // chatId is the raw WeChat user ID (prefix already stripped by IM manager)
+      const userId = chatId;
 
       const contextToken = contextTokenCache.get(userId);
       if (!contextToken) return;

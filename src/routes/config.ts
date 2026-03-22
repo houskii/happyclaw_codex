@@ -3,6 +3,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { Agent as HttpsAgent } from 'node:https';
 import { ProxyAgent } from 'proxy-agent';
+import QRCode from 'qrcode';
 import { Hono } from 'hono';
 import type { Variables } from '../web-context.js';
 import { canAccessGroup, getWebDeps } from '../web-context.js';
@@ -2315,9 +2316,25 @@ configRoutes.post('/user-im/wechat/qrcode', authMiddleware, async (c) => {
     if (!data.qrcode) {
       return c.json({ error: 'No QR code in response' }, 502);
     }
+
+    // qrcode_img_content is a URL string (WeChat deep link) to be encoded
+    // INTO a QR code image, not an image URL itself.
+    let qrcodeDataUri = '';
+    if (data.qrcode_img_content) {
+      try {
+        qrcodeDataUri = await QRCode.toDataURL(data.qrcode_img_content, {
+          width: 512,
+          margin: 2,
+          color: { dark: '#000000', light: '#ffffff' },
+        });
+      } catch (qrErr) {
+        logger.warn({ err: qrErr }, 'Failed to generate QR code image');
+      }
+    }
+
     return c.json({
       qrcode: data.qrcode,
-      qrcodeUrl: data.qrcode_img_content || '',
+      qrcodeUrl: qrcodeDataUri,
     });
   } catch (err) {
     const message =
@@ -2454,80 +2471,6 @@ configRoutes.post('/user-im/wechat/disconnect', authMiddleware, async (c) => {
     return c.json({ error: message }, 500);
   }
 });
-
-// Generate pairing code for WeChat
-configRoutes.post(
-  '/user-im/wechat/pairing-code',
-  authMiddleware,
-  async (c) => {
-    const user = c.get('user') as AuthUser;
-    const config = getUserWeChatConfig(user.id);
-    if (!config?.botToken) {
-      return c.json(
-        { error: 'WeChat not configured. Please scan QR code first.' },
-        400,
-      );
-    }
-
-    try {
-      const { generatePairingCode } = await import('../telegram-pairing.js');
-      const result = generatePairingCode(user.id);
-      return c.json(result);
-    } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Failed to generate pairing code';
-      logger.warn({ err }, 'Failed to generate WeChat pairing code');
-      return c.json({ error: message }, 500);
-    }
-  },
-);
-
-// List WeChat paired chats for the current user
-configRoutes.get('/user-im/wechat/paired-chats', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  const groups = (deps?.getRegisteredGroups() ?? {}) as Record<
-    string,
-    { name: string; added_at: string; created_by?: string }
-  >;
-  const chats: Array<{ jid: string; name: string; addedAt: string }> = [];
-  for (const [jid, group] of Object.entries(groups)) {
-    if (jid.startsWith('wechat:') && group.created_by === user.id) {
-      chats.push({ jid, name: group.name, addedAt: group.added_at });
-    }
-  }
-  return c.json({ chats });
-});
-
-// Remove (unpair) a WeChat chat
-configRoutes.delete(
-  '/user-im/wechat/paired-chats/:jid',
-  authMiddleware,
-  (c) => {
-    const user = c.get('user') as AuthUser;
-    const jid = decodeURIComponent(c.req.param('jid'));
-
-    if (!jid.startsWith('wechat:')) {
-      return c.json({ error: 'Invalid WeChat chat JID' }, 400);
-    }
-
-    const groups = deps?.getRegisteredGroups() ?? {};
-    const group = groups[jid];
-    if (!group) {
-      return c.json({ error: 'Chat not found' }, 404);
-    }
-    if (group.created_by !== user.id) {
-      return c.json({ error: 'Not authorized to remove this chat' }, 403);
-    }
-
-    deleteRegisteredGroup(jid);
-    deleteChatHistory(jid);
-    delete groups[jid];
-    logger.info({ jid, userId: user.id }, 'WeChat chat unpaired');
-    return c.json({ success: true });
-  },
-);
 
 // ─── IM Binding management (bindings panoramic page) ────────────
 
