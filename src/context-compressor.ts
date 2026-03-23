@@ -20,7 +20,9 @@ import {
 import { getClaudeProviderConfig } from './runtime-config.js';
 import type { NewMessage } from './types.js';
 
-const COMPRESSION_MODEL = 'claude-sonnet-4-20250514';
+// OAuth tokens (from Claude Code subscription) only allow Haiku for direct Messages API.
+// Haiku is fast and sufficient for summarization tasks.
+const COMPRESSION_MODEL = 'claude-haiku-4-5-20251001';
 const MAX_MESSAGES_TO_SUMMARIZE = 200;
 const MAX_CONTENT_PER_MESSAGE = 500; // chars, truncate long messages
 const AUTO_COMPRESS_THRESHOLD = 80; // messages since last compression to trigger auto
@@ -62,13 +64,33 @@ export function isCompressing(groupFolder: string): boolean {
 }
 
 /**
- * Get the Anthropic API key from the provider config.
- * Falls back to ANTHROPIC_API_KEY env var.
+ * Get authentication credentials for the Anthropic API.
+ * Tries: API key → OAuth credentials → OAuth token → env var.
+ * Returns { type, token } where type determines the HTTP header to use.
  */
-function getApiKey(): string | null {
+function getAuthCredentials(): { type: 'api-key' | 'bearer'; token: string } | null {
   const config = getClaudeProviderConfig();
-  if (config.anthropicApiKey) return config.anthropicApiKey;
-  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+
+  // 1. Direct API key (highest priority)
+  if (config.anthropicApiKey) {
+    return { type: 'api-key', token: config.anthropicApiKey };
+  }
+
+  // 2. OAuth credentials (official profile — most common in HappyClaw)
+  if (config.claudeOAuthCredentials?.accessToken) {
+    return { type: 'bearer', token: config.claudeOAuthCredentials.accessToken };
+  }
+
+  // 3. Legacy OAuth token
+  if (config.claudeCodeOauthToken) {
+    return { type: 'bearer', token: config.claudeCodeOauthToken };
+  }
+
+  // 4. Environment variable fallback
+  if (process.env.ANTHROPIC_API_KEY) {
+    return { type: 'api-key', token: process.env.ANTHROPIC_API_KEY };
+  }
+
   return null;
 }
 
@@ -107,35 +129,57 @@ async function callSonnet(
   systemPrompt: string,
   userMessage: string,
 ): Promise<string> {
-  const apiKey = getApiKey();
-  if (!apiKey) {
+  const auth = getAuthCredentials();
+  if (!auth) {
     throw new Error(
-      'No Anthropic API key configured. Set it in Claude Provider settings or ANTHROPIC_API_KEY env var.',
+      'No Anthropic credentials configured. Set API key, OAuth credentials, or ANTHROPIC_API_KEY env var.',
     );
   }
 
   const baseUrl = getBaseUrl();
   const url = `${baseUrl}/v1/messages`;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: COMPRESSION_MODEL,
-      max_tokens: 2048,
-      system: systemPrompt,
-      messages: [
-        {
-          role: 'user',
-          content: userMessage,
-        },
-      ],
-    }),
-  });
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01',
+  };
+  if (auth.type === 'api-key') {
+    headers['x-api-key'] = auth.token;
+  } else {
+    headers['Authorization'] = `Bearer ${auth.token}`;
+    // OAuth Bearer requires this beta header for Messages API access
+    headers['anthropic-beta'] = 'oauth-2025-04-20';
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000); // 60s timeout
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: COMPRESSION_MODEL,
+        max_tokens: 2048,
+        system: systemPrompt,
+        messages: [
+          {
+            role: 'user',
+            content: userMessage,
+          },
+        ],
+      }),
+    });
+  } catch (err: unknown) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('Anthropic API 请求超时 (60s)');
+    }
+    throw err;
+  }
+  clearTimeout(timer);
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -281,6 +325,7 @@ export async function compressContext(
         groupFolder,
         chatJid,
         messageCount: messages.length,
+        transcriptLength: transcript.length,
         extractKnowledge: !!options?.extractKnowledge,
       },
       'Compressing context',
@@ -297,42 +342,17 @@ export async function compressContext(
 
 Keep the summary under 2000 tokens. Focus on WHAT was decided and done, not the back-and-forth discussion process.`;
 
+    logger.info({ groupFolder }, 'Calling Haiku for summary...');
+    const t0 = Date.now();
     const summary = await callSonnet(
       summaryPrompt,
       `Please summarize this conversation:\n\n${transcript}`,
     );
+    logger.info({ groupFolder, durationMs: Date.now() - t0, summaryLength: summary.length }, 'Summary generated');
 
-    // 4. Optionally extract knowledge
-    let extractedKnowledge = 0;
-    if (options?.extractKnowledge && options.onKnowledgeEntry) {
-      try {
-        const entries = await extractKnowledgeEntries(transcript);
-        for (const entry of entries) {
-          const content = `[${entry.type}] ${entry.topic}: ${entry.content}`;
-          const importance = entry.confidence === 'high' ? 'high' : 'normal';
-          try {
-            await options.onKnowledgeEntry(content, importance);
-            extractedKnowledge++;
-          } catch (err) {
-            logger.warn(
-              { topic: entry.topic, error: err instanceof Error ? err.message : String(err) },
-              'Failed to save knowledge entry to Memory Agent',
-            );
-          }
-        }
-        logger.info(
-          { groupFolder, chatJid, extracted: extractedKnowledge, total: entries.length },
-          'Knowledge extraction completed',
-        );
-      } catch (err) {
-        logger.error(
-          { groupFolder, chatJid, error: err instanceof Error ? err.message : String(err) },
-          'Knowledge extraction failed (compression will continue)',
-        );
-      }
-    }
-
-    // 5. Store summary
+    // 4. Store summary FIRST — knowledge extraction runs in background
+    //    (Knowledge extraction + Memory Agent writes can take minutes,
+    //     which would exceed the frontend's 60s request timeout.)
     const contextSummary: ContextSummary = {
       group_folder: groupFolder,
       chat_jid: chatJid,
@@ -352,16 +372,51 @@ Keep the summary under 2000 tokens. Focus on WHAT was decided and done, not the 
         chatJid,
         messageCount: messages.length,
         summaryLength: summary.length,
-        extractedKnowledge,
       },
       'Context compressed successfully',
     );
+
+    // 5. Fire-and-forget: knowledge extraction in background
+    if (options?.extractKnowledge && options.onKnowledgeEntry) {
+      const onEntry = options.onKnowledgeEntry;
+      void (async () => {
+        try {
+          logger.info({ groupFolder }, 'Background knowledge extraction starting...');
+          const t1 = Date.now();
+          const entries = await extractKnowledgeEntries(transcript);
+          logger.info({ groupFolder, durationMs: Date.now() - t1, entryCount: entries.length }, 'Knowledge entries extracted');
+          let saved = 0;
+          for (const entry of entries) {
+            const content = `[${entry.type}] ${entry.topic}: ${entry.content}`;
+            const importance = entry.confidence === 'high' ? 'high' : 'normal';
+            try {
+              await onEntry(content, importance);
+              saved++;
+            } catch (err) {
+              logger.warn(
+                { topic: entry.topic, error: err instanceof Error ? err.message : String(err) },
+                'Failed to save knowledge entry to Memory Agent',
+              );
+            }
+          }
+          logger.info(
+            { groupFolder, chatJid, extracted: saved, total: entries.length },
+            'Background knowledge extraction completed',
+          );
+        } catch (err) {
+          logger.error(
+            { groupFolder, chatJid, error: err instanceof Error ? err.message : String(err) },
+            'Background knowledge extraction failed',
+          );
+        }
+      })();
+    }
 
     return {
       success: true,
       summary,
       messageCount: messages.length,
-      extractedKnowledge,
+      extractedKnowledge: -1, // -1 indicates extraction is running in background
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);

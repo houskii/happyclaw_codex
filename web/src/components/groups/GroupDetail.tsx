@@ -135,7 +135,9 @@ export function GroupDetail({ group }: GroupDetailProps) {
       );
       if (res.success) {
         const knowledgeMsg =
-          res.extractedKnowledge ? `，萃取了 ${res.extractedKnowledge} 条知识` : '';
+          res.extractedKnowledge === -1 ? '（知识萃取在后台进行中）'
+          : res.extractedKnowledge ? `，萃取了 ${res.extractedKnowledge} 条知识`
+          : '';
         setCompressResult(`压缩完成，处理了 ${res.messageCount ?? '?'} 条消息${knowledgeMsg}`);
         loadSummary();
       } else {
