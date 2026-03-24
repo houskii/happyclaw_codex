@@ -49,7 +49,8 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
   const [baseUrl, setBaseUrl] = useState('');
   const [authToken, setAuthToken] = useState('');
   const [authTokenDirty, setAuthTokenDirty] = useState(false);
-  const [model, setModel] = useState('');
+  const [claudeModel, setClaudeModel] = useState('');
+  const [openaiModel, setOpenaiModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
   const [reasoningSummary, setReasoningSummary] = useState('');
   const [customEnv, setCustomEnv] = useState<{ key: string; value: string }[]>([]);
@@ -79,9 +80,8 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
     setAuthToken('');
     setAuthTokenDirty(false);
     const entries = Object.entries(config.customEnv || {}).map(([key, value]) => ({ key, value }));
-    const modelFromConfig =
-      (config.customEnv && (config.customEnv[MODEL_ENV_KEY] || config.customEnv[OPENAI_MODEL_ENV_KEY])) || '';
-    setModel(modelFromConfig);
+    setClaudeModel((config.customEnv && config.customEnv[MODEL_ENV_KEY]) || '');
+    setOpenaiModel((config.customEnv && config.customEnv[OPENAI_MODEL_ENV_KEY]) || '');
     setReasoningEffort((config.customEnv && config.customEnv[OPENAI_REASONING_EFFORT_KEY]) || '');
     setReasoningSummary((config.customEnv && config.customEnv[OPENAI_REASONING_SUMMARY_KEY]) || '');
     setCustomEnv(entries.filter(({ key }) => key !== MODEL_ENV_KEY && key !== OPENAI_MODEL_ENV_KEY && key !== OPENAI_REASONING_EFFORT_KEY && key !== OPENAI_REASONING_SUMMARY_KEY));
@@ -99,7 +99,6 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
 
     // Build custom env (filter empty keys)
     const envMap: Record<string, string> = {};
-    const activeModelKey = llmProvider === 'openai' ? OPENAI_MODEL_ENV_KEY : MODEL_ENV_KEY;
     for (const { key, value } of customEnv) {
       const k = key.trim();
       if (!k || k === MODEL_ENV_KEY || k === OPENAI_MODEL_ENV_KEY || k === OPENAI_REASONING_EFFORT_KEY || k === OPENAI_REASONING_SUMMARY_KEY) continue;
@@ -107,9 +106,13 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
     }
     if (reasoningEffort) envMap[OPENAI_REASONING_EFFORT_KEY] = reasoningEffort;
     if (reasoningSummary) envMap[OPENAI_REASONING_SUMMARY_KEY] = reasoningSummary;
-    const normalizedModel = model.trim();
-    if (normalizedModel) {
-      envMap[activeModelKey] = normalizedModel;
+    const normalizedClaudeModel = claudeModel.trim();
+    const normalizedOpenaiModel = openaiModel.trim();
+    if (normalizedClaudeModel) {
+      envMap[MODEL_ENV_KEY] = normalizedClaudeModel;
+    }
+    if (normalizedOpenaiModel) {
+      envMap[OPENAI_MODEL_ENV_KEY] = normalizedOpenaiModel;
     }
     data.customEnv = envMap;
 
@@ -263,8 +266,8 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
               <div className="space-y-1.5">
                 <Input
                   type="text"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  value={claudeModel}
+                  onChange={(e) => setClaudeModel(e.target.value)}
                   placeholder="opus / sonnet / haiku 或完整模型 ID"
                   className="px-2.5 py-1.5 text-xs h-auto font-mono"
                   list="anthropic-model-presets"
@@ -289,8 +292,8 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
               <div className="space-y-1.5">
                 <Input
                   type="text"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  value={openaiModel}
+                  onChange={(e) => setOpenaiModel(e.target.value)}
                   placeholder="gpt-5.4 / gpt-5.3-codex 或完整模型 ID"
                   className="px-2.5 py-1.5 text-xs h-auto font-mono"
                   list="openai-model-presets"
