@@ -50,7 +50,19 @@ export type {
 export { ContextManager } from './context.js';
 
 // Prompt builder
-export { buildBaseSystemPrompt } from './prompt-builder.js';
+export {
+  buildBasePrompt,
+  buildAppendPrompt,
+  buildFullPrompt,
+  buildChannelRoutingReminder,
+  normalizeHomeFlags,
+  INTERACTION_GUIDELINES,
+  OUTPUT_GUIDELINES,
+  WEB_FETCH_GUIDELINES,
+  BACKGROUND_TASK_GUIDELINES,
+} from './prompt-builder.js';
+// Legacy alias
+export { buildBasePrompt as buildBaseSystemPrompt } from './prompt-builder.js';
 
 // Built-in plugins
 export { MessagingPlugin } from './plugins/messaging.js';
