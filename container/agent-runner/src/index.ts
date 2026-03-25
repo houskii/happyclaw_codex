@@ -19,7 +19,6 @@ import path from 'path';
 import { query, HookCallback, PreCompactHookInput, createSdkMcpServer, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { createPostToolUseReviewHook, createStopReviewHook } from './review-hooks.js';
-import type { ReviewContextConfig } from './review-context/index.js';
 import { createGatekeeperHook, createLoopRecoveryHook } from './safety-hooks.js';
 
 import type {
@@ -1080,11 +1079,6 @@ async function runQuery(
   // Non-home containers discover it via filesystem (readonly mount) without systemPrompt injection.
   const extraDirs = [WORKSPACE_GLOBAL, WORKSPACE_MEMORY];
 
-  // Service context config for GPT review hooks (env-driven, disabled by default)
-  const reviewContextRoot = process.env.REVIEW_CONTEXT_ROOT;
-  const reviewContextConfig: ReviewContextConfig | undefined = reviewContextRoot
-    ? { provider: 'pack-file', options: { root: reviewContextRoot } }
-    : undefined;
 
   try {
     const q = query({
@@ -1110,13 +1104,12 @@ async function runQuery(
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }],
         PreToolUse: [{ hooks: [createGatekeeperHook(log)] }],
-        PostToolUse: [{ hooks: [createPostToolUseReviewHook(WORKSPACE_IPC, path.join(WORKSPACE_IPC, 'messages'), containerInput.chatJid, log, reviewContextConfig), createLoopRecoveryHook(log)] }],
+        PostToolUse: [{ hooks: [createPostToolUseReviewHook(WORKSPACE_IPC, path.join(WORKSPACE_IPC, 'messages'), containerInput.chatJid, log), createLoopRecoveryHook(log)] }],
         Stop: [{ hooks: [createStopReviewHook(
           WORKSPACE_IPC,
           path.join(WORKSPACE_IPC, 'messages'),
           containerInput.chatJid,
           log,
-          reviewContextConfig,
         )] }],
       },
       agents: PREDEFINED_AGENTS,
