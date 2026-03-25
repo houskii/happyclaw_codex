@@ -348,6 +348,51 @@ function buildVolumeMounts(
     containerOverride,
     resolvedProvider?.customEnv,
   );
+
+  // Per-workspace model override (takes priority over global and container-env config)
+  if (group.model) {
+    const filteredLines = envLines.filter((l) => !l.startsWith('HAPPYCLAW_MODEL='));
+    envLines.length = 0;
+    envLines.push(...filteredLines);
+    envLines.push(`HAPPYCLAW_MODEL=${group.model}`);
+  }
+
+  // LLM provider selection (default: claude)
+  const llmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
+  envLines.push(`HAPPYCLAW_LLM_PROVIDER=${llmProvider}`);
+  if (llmProvider === 'codex') {
+    const openaiKey = process.env.OPENAI_API_KEY || '';
+    if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+  }
+
+  // Agent-browser isolation: each workspace gets its own browser session + profile
+  envLines.push(`AGENT_BROWSER_SESSION=${group.folder}`);
+  envLines.push(`AGENT_BROWSER_PROFILE=/workspace/group/.agent-browser-profile`);
+
+  // Memory Agent env vars (for Docker containers)
+  if (ownerId) {
+    const token = getInternalToken();
+    if (token) envLines.push(`HAPPYCLAW_INTERNAL_TOKEN=${token}`);
+    // Docker containers use host.docker.internal to reach the host
+    envLines.push(
+      `HAPPYCLAW_API_URL=http://host.docker.internal:${process.env.WEB_PORT || '3000'}`,
+    );
+
+    // Pass memory query timeout so agent-runner HTTP timeout stays in sync
+    const settings = getSystemSettings();
+    envLines.push(
+      `HAPPYCLAW_MEMORY_QUERY_TIMEOUT=${settings.memoryQueryTimeout}`,
+    );
+
+    // Mount memory directory as read-only for index.md injection
+    const memoryIndexDir = path.join(DATA_DIR, 'memory', ownerId);
+    mkdirForContainer(memoryIndexDir);
+    mounts.push({
+      hostPath: memoryIndexDir,
+      containerPath: '/workspace/memory-index',
+      readonly: true,
+    });
+  }
   if (envLines.length > 0) {
     const envFilePath = path.join(envDir, 'env');
     const quotedLines = shellQuoteEnvLines(envLines);
@@ -982,6 +1027,7 @@ export async function runHostAgent(
       }
     }
 
+<<<<<<< HEAD
     // Write .credentials.json for OAuth credentials
     const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
     if (mergedConfig.claudeOAuthCredentials) {
@@ -993,6 +1039,30 @@ export async function runHostAgent(
           'Failed to write .credentials.json for host agent',
         );
       }
+=======
+  // Per-workspace model override (takes priority over global and container-env config)
+  if (group.model) {
+    hostEnv['HAPPYCLAW_MODEL'] = group.model;
+  }
+
+  // LLM provider selection for host mode
+  const hostLlmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
+  hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
+  if (hostLlmProvider === 'codex' && process.env.OPENAI_API_KEY) {
+    hostEnv['OPENAI_API_KEY'] = process.env.OPENAI_API_KEY;
+  }
+
+  // Write .credentials.json for OAuth credentials
+  const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
+  if (mergedConfig.claudeOAuthCredentials) {
+    try {
+      writeCredentialsFile(groupSessionsDir, mergedConfig);
+    } catch (err) {
+      logger.warn(
+        { folder: group.folder, err },
+        'Failed to write .credentials.json for host agent',
+      );
+>>>>>>> bb3da40 (功能: Codex 归档 + 宿主机集成（Phase 2 Steps 2.1-2.3）)
     }
 
     // 路径映射
@@ -1026,6 +1096,7 @@ export async function runHostAgent(
       hostEnv['IS_SANDBOX'] = '1';
     }
 
+<<<<<<< HEAD
     // 6. 编译检查
     const projectRoot = process.cwd();
     const agentRunnerRoot = path.join(projectRoot, 'container', 'agent-runner');
@@ -1048,6 +1119,73 @@ export async function runHostAgent(
       );
       return hostModeSetupError(
         `缺少 agent-runner 依赖（${missing}）。请先执行：${setupInstallHint}`,
+=======
+  // Agent-browser isolation: each workspace gets its own browser session + profile
+  hostEnv['AGENT_BROWSER_SESSION'] = group.folder;
+  hostEnv['AGENT_BROWSER_PROFILE'] = path.join(groupDir, '.agent-browser-profile');
+
+  // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
+  hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
+  // CLI 禁止 root 用户使用 --dangerously-skip-permissions，
+  // 通过 IS_SANDBOX 标记告知 CLI 当前运行在受控环境中以绕过此限制
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    hostEnv['IS_SANDBOX'] = '1';
+  }
+
+  // 6. 编译检查
+  const projectRoot = process.cwd();
+  // llm_provider=openai is now supported via Codex provider
+
+  const runnerSubdir = 'agent-runner';
+  const agentRunnerRoot = path.join(projectRoot, 'container', runnerSubdir);
+  const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
+  const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
+
+  const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
+  const installHint = `npm --prefix container/${runnerSubdir} install`;
+  const buildHint = `npm --prefix container/${runnerSubdir} run build`;
+
+  const missingDeps = requiredDeps.filter((dep) => {
+    const depJson = path.join(
+      agentRunnerNodeModules,
+      ...dep.split('/'),
+      'package.json',
+    );
+    return !fs.existsSync(depJson);
+  });
+  if (missingDeps.length > 0) {
+    const missing = missingDeps.join(', ');
+    logger.error(
+      { group: group.name, missingDeps },
+      'Host agent preflight failed: dependencies missing',
+    );
+    return hostModeSetupError(
+      `缺少 ${runnerSubdir} 依赖（${missing}）。请先执行：${installHint}`,
+    );
+  }
+  if (!fs.existsSync(agentRunnerDist)) {
+    logger.error(
+      { group: group.name, agentRunnerDist },
+      'Host agent preflight failed: dist not found',
+    );
+    return hostModeSetupError(
+      `${runnerSubdir} 未编译。请先执行：${buildHint}`,
+    );
+  }
+
+  // Warn if dist may be stale (src newer than dist)
+  try {
+    const distMtime = fs.statSync(agentRunnerDist).mtimeMs;
+    const srcDir = path.join(agentRunnerRoot, 'src');
+    const srcFiles = fs.readdirSync(srcDir);
+    const newestSrc = Math.max(
+      ...srcFiles.map((f) => fs.statSync(path.join(srcDir, f)).mtimeMs),
+    );
+    if (newestSrc > distMtime) {
+      logger.warn(
+        { group: group.name },
+        `${runnerSubdir} dist 可能已过期（src 比 dist 新）。建议执行：${buildHint}`,
+>>>>>>> bb3da40 (功能: Codex 归档 + 宿主机集成（Phase 2 Steps 2.1-2.3）)
       );
     }
     if (!fs.existsSync(agentRunnerDist)) {
