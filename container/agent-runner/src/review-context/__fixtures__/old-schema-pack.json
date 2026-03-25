@@ -1,7 +1,7 @@
 {
   "schema_major": 2,
   "schema_minor": 0,
-  "service": "ea.expense.travel_bff",
+  "service": "com.example.demo_service",
   "generation_id": "1_20260320T100000Z_abc123def456",
   "provenance": {
     "generated_at": "2026-03-20T10:00:00Z",

@@ -52,7 +52,7 @@ function assert(condition: boolean, msg: string) {
   // assembleContext should produce non-empty string
   const block = assembleContext(output, 2000);
   assert(block.length > 0, 'normal pack: assembleContext produces output');
-  assert(block.includes('travel_bff'), 'normal pack: output contains service name');
+  assert(block.includes('demo_service'), 'normal pack: output contains service name');
 }
 
 // ─── Test 2: Missing sections → shouldInject = false ────

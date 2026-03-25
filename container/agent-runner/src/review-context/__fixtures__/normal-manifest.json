@@ -4,20 +4,20 @@
   "generated_at": "2026-03-20T10:00:00Z",
   "generator_version": "0.1.0",
   "entries": {
-    "travel-bff": {
-      "pack_file": "packs/travel-bff.json",
+    "demo-service": {
+      "pack_file": "packs/demo-service.json",
       "pack_size": 0,
       "pack_sha256": "",
       "identifiers": {
-        "go_module": "code.byted.org/ea-expense/travel-bff"
+        "go_module": "github.com/example-org/demo-service"
       }
     },
-    "travel-flight-biz": {
-      "pack_file": "packs/travel-flight-biz.json",
+    "demo-worker": {
+      "pack_file": "packs/demo-worker.json",
       "pack_size": 0,
       "pack_sha256": "",
       "identifiers": {
-        "go_module": "code.byted.org/ea-expense/travel-flight-biz"
+        "go_module": "github.com/example-org/demo-worker"
       }
     }
   }

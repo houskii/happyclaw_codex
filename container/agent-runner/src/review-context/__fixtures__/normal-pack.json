@@ -1,30 +1,30 @@
 {
   "schema_major": 1,
   "schema_minor": 0,
-  "service": "ea.expense.travel_bff",
+  "service": "com.example.demo_service",
   "generation_id": "1_20260320T100000Z_abc123def456",
   "provenance": {
     "generated_at": "2026-03-20T10:00:00Z",
     "generator_version": "0.1.0",
     "source_revision": "abc123def456789012345678901234567890abcd",
     "overlay_verified_at": "2026-03-20T10:05:00Z",
-    "overlay_owner": "lihaoyuan.ryan",
+    "overlay_owner": "test-user",
     "freshness": "fresh",
     "confidence": "high"
   },
   "sections": [
     {
-      "id": "role-bff",
+      "id": "role-gateway",
       "type": "role",
       "priority": 100,
-      "text": "travel-bff 是差旅系统的 API 网关层（Go/Kitex），负责前端聚合和路由。"
+      "text": "demo-service is the API gateway layer (Go/Kitex), responsible for frontend aggregation and routing."
     },
     {
-      "id": "risk-concurrent-booking",
+      "id": "risk-concurrent-order",
       "type": "risk",
       "priority": 90,
       "severity": "high",
-      "text": "并发下单场景：同一用户可能同时发起多个预订请求，bff 层必须做幂等校验。",
+      "text": "Concurrent ordering: the same user may send multiple booking requests simultaneously, the gateway must enforce idempotency.",
       "applies_to": ["handler/", "service/booking/"],
       "tags": ["concurrency", "idempotency"]
     },
@@ -32,21 +32,21 @@
       "id": "invariant-auth-header",
       "type": "invariant",
       "priority": 85,
-      "text": "所有对下游 biz 服务的 RPC 调用必须透传 X-Travel-Auth-Token header，缺失会导致 403。",
+      "text": "All RPC calls to downstream services must forward the X-Auth-Token header; missing it causes 403.",
       "tags": ["auth", "rpc"]
     },
     {
       "id": "dep-item-center",
       "type": "dependency",
       "priority": 70,
-      "text": "travel-item-center (ea.expense.travel_item_center) 是搜索聚合层，bff 通过 item-sdk 调用。接口变更需同步更新 item-sdk 版本。",
+      "text": "item-center (com.example.item_center) is the search aggregation layer, called via item-sdk. Interface changes require updating the SDK version.",
       "applies_to": ["service/search/", "service/item/"]
     },
     {
       "id": "hint-mock-header",
       "type": "hint",
       "priority": 60,
-      "text": "测试时通过 flight-mock/hotel-mock/train-mock header 控制 Mock 模式，值为场景名或 proxy。确保 Persistent metainfo 全链路透传。",
+      "text": "During testing, use mock headers to control mock mode. Values can be scenario names or 'proxy'. Ensure persistent metainfo is propagated end-to-end.",
       "tags": ["testing", "mock"],
       "source": "overlay"
     },
@@ -54,7 +54,7 @@
       "id": "hint-copay",
       "type": "hint",
       "priority": 50,
-      "text": "Copay 分账规则：机票 25% 个人、火车 20%、酒店按超标倍率阶梯（0x→0%, 1x→25%, 1.25x→50%, 3x→100%）。",
+      "text": "Cost sharing rules: category A 25% personal, category B 20%, category C tiered by overage ratio.",
       "applies_to": ["service/payment/", "service/copay/"]
     }
   ],
