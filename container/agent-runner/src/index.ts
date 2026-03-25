@@ -35,6 +35,16 @@ import { PREDEFINED_AGENTS } from './agent-definitions.js';
 import { createContextManager, coreToolsToSdkTools } from './mcp-adapter.js';
 import { writeIpcFile } from 'happyclaw-agent-runner-core';
 import { SessionState } from './session-state.js';
+import {
+  buildIpcPaths,
+  IPC_POLL_MS,
+  shouldClose,
+  shouldDrain,
+  shouldInterrupt,
+  drainIpcInput,
+  waitForIpcMessage,
+  isInterruptRelatedError,
+} from './ipc-handler.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
@@ -47,10 +57,7 @@ const WORKSPACE_SKILLS = process.env.HAPPYCLAW_SKILLS_DIR || '/workspace/user-sk
 // 别名自动解析为最新版本，如 opus → Opus 4.6
 const CLAUDE_MODEL = process.env.HAPPYCLAW_MODEL || process.env.ANTHROPIC_MODEL || 'opus';
 
-const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
-const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
-const IPC_INPUT_DRAIN_SENTINEL = path.join(IPC_INPUT_DIR, '_drain');
-const IPC_POLL_MS = 500;
+const ipcPaths = buildIpcPaths(WORKSPACE_IPC);
 
 // IM channels file path — stays in index.ts because it depends on WORKSPACE_IPC
 const IM_CHANNELS_FILE = path.join(WORKSPACE_IPC, '.recent-im-channels.json');
@@ -347,146 +354,6 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   return lines.join('\n');
 }
 
-/**
- * Check for _close sentinel.
- */
-function shouldClose(): boolean {
-  if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
-    try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
-    return true;
-  }
-  return false;
-}
-
-/**
- * Check for _drain sentinel.
- * Unlike _close (immediate exit), _drain means "finish current query then exit".
- */
-function shouldDrain(): boolean {
-  if (fs.existsSync(IPC_INPUT_DRAIN_SENTINEL)) {
-    try { fs.unlinkSync(IPC_INPUT_DRAIN_SENTINEL); } catch { /* ignore */ }
-    return true;
-  }
-  return false;
-}
-
-const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
-
-function isInterruptRelatedError(err: unknown): boolean {
-  const errno = err as NodeJS.ErrnoException;
-  const message = err instanceof Error ? err.message : String(err ?? '');
-  return errno?.code === 'ABORT_ERR'
-    || /abort|aborted|interrupt|interrupted|cancelled|canceled/i.test(message);
-}
-
-/**
- * Check for _interrupt sentinel (graceful query interruption).
- */
-function shouldInterrupt(): boolean {
-  if (fs.existsSync(IPC_INPUT_INTERRUPT_SENTINEL)) {
-    try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
-    return true;
-  }
-  return false;
-}
-
-/**
- * Drain all pending IPC input messages.
- * Returns messages found (with optional images), or empty array.
- */
-interface IpcDrainResult {
-  messages: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }>;
-  modeChange?: string; // 'plan' | 'bypassPermissions'
-}
-
-function drainIpcInput(): IpcDrainResult {
-  const result: IpcDrainResult = { messages: [] };
-  try {
-    const files = fs.readdirSync(IPC_INPUT_DIR)
-      .filter(f => f.endsWith('.json'))
-      .sort();
-
-    for (const file of files) {
-      const filePath = path.join(IPC_INPUT_DIR, file);
-      try {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        fs.unlinkSync(filePath);
-        if (data.type === 'message' && data.text) {
-          result.messages.push({
-            text: data.text,
-            images: data.images,
-          });
-        } else if (data.type === 'set_mode' && data.mode) {
-          result.modeChange = data.mode;
-        }
-      } catch (err) {
-        log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
-        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
-      }
-    }
-  } catch (err) {
-    log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return result;
-}
-
-/**
- * Wait for a new IPC message or _close sentinel.
- * Returns the messages (with optional images), or null if _close.
- */
-function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }> } | null> {
-  return new Promise((resolve) => {
-    let pollCount = 0;
-    const HEARTBEAT_INTERVAL = 120; // Log every ~60 seconds (120 polls * 500ms)
-    const poll = () => {
-      pollCount++;
-      if (shouldClose()) {
-        resolve(null);
-        return;
-      }
-      if (shouldDrain()) {
-        log('Drain sentinel received while idle, exiting for turn boundary');
-        writeOutput({ status: 'drained', result: null });
-        // Must self-exit: unlike _close (host sends SIGTERM), _drain expects
-        // the process to terminate. SDK/MCP resources keep the event loop alive.
-        process.exit(0);
-      }
-      if (shouldInterrupt()) {
-        log('Interrupt sentinel received while idle, ignoring');
-        state.clearInterruptRequested();
-      }
-      // Periodic heartbeat to detect stuck polling
-      if (pollCount % HEARTBEAT_INTERVAL === 0) {
-        try {
-          const files = fs.readdirSync(IPC_INPUT_DIR);
-          log(`Idle heartbeat: ${Math.round(pollCount * IPC_POLL_MS / 1000)}s waiting, IPC dir has ${files.length} files: [${files.join(', ')}]`);
-        } catch {
-          log(`Idle heartbeat: ${Math.round(pollCount * IPC_POLL_MS / 1000)}s waiting, IPC dir read failed`);
-        }
-      }
-      const { messages, modeChange } = drainIpcInput();
-      if (modeChange) {
-        state.currentPermissionMode = modeChange as PermissionMode;
-        log(`Mode change during idle: ${modeChange}`);
-      }
-      if (messages.length > 0) {
-        // 合并多条消息的文本和图片
-        const combinedText = messages.map((m) => m.text).join('\n');
-        const allImages = messages.flatMap((m) => m.images || []);
-        // Track IM channels for post-compaction routing reminder
-        state.extractSourceChannels(combinedText, IM_CHANNELS_FILE);
-        log(`Idle IPC pickup: ${messages.length} message(s), ${combinedText.length} chars`);
-        // Emit acknowledgement so host can track IPC delivery (mirrors pollIpcDuringQuery)
-        writeOutput({ status: 'stream', result: null, streamEvent: { eventType: 'status', statusText: 'ipc_message_received' } });
-        resolve({ text: combinedText, images: allImages.length > 0 ? allImages : undefined });
-        return;
-      }
-      setTimeout(poll, IPC_POLL_MS);
-    };
-    poll();
-  });
-}
-
 // Memory Agent mode: read index.md from the memory-index mount
 const WORKSPACE_MEMORY_INDEX = process.env.HAPPYCLAW_WORKSPACE_MEMORY_INDEX || '/workspace/memory-index';
 
@@ -710,7 +577,7 @@ async function runQuery(
 
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
-    if (shouldClose()) {
+    if (shouldClose(ipcPaths)) {
       log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
       stream.end();
@@ -719,13 +586,13 @@ async function runQuery(
     }
     // Check for _drain during query: consume the sentinel immediately so it
     // isn't lost to a filesystem race, but let the current query finish.
-    if (!drainDetectedDuringQuery && shouldDrain()) {
+    if (!drainDetectedDuringQuery && shouldDrain(ipcPaths)) {
       log('Drain sentinel detected during query, will exit after query completes');
       drainDetectedDuringQuery = true;
       // Don't end the stream or stop polling — let the query finish naturally.
       // The flag is checked in the main loop after the for-await exits.
     }
-    if (shouldInterrupt()) {
+    if (shouldInterrupt(ipcPaths)) {
       log('Interrupt sentinel detected, interrupting current query');
       interruptedDuringQuery = true;
       state.markInterruptRequested();
@@ -734,7 +601,7 @@ async function runQuery(
       ipcPolling = false;
       return;
     }
-    const { messages, modeChange } = drainIpcInput();
+    const { messages, modeChange } = drainIpcInput(ipcPaths, log);
     if (modeChange) {
       state.currentPermissionMode = modeChange as PermissionMode;
       log(`Mode change via IPC: ${modeChange}`);
@@ -1269,17 +1136,17 @@ async function main(): Promise<void> {
   });
   let mcpServerConfig = buildMcpServerConfig();
   const memoryRecallPrompt = buildMemoryRecallPrompt(isHome, isAdminHome);
-  fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+  fs.mkdirSync(ipcPaths.inputDir, { recursive: true });
 
   // Clean up stale sentinels from previous container runs
-  try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
-  try { fs.unlinkSync(IPC_INPUT_DRAIN_SENTINEL); } catch { /* ignore */ }
-  try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+  try { fs.unlinkSync(ipcPaths.closeSentinel); } catch { /* ignore */ }
+  try { fs.unlinkSync(ipcPaths.drainSentinel); } catch { /* ignore */ }
+  try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
 
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
   let promptImages = containerInput.images;
-  const pendingDrain = drainIpcInput();
+  const pendingDrain = drainIpcInput(ipcPaths, log);
   if (pendingDrain.modeChange) {
     state.currentPermissionMode = pendingDrain.modeChange as PermissionMode;
     log(`Initial mode change via IPC: ${pendingDrain.modeChange}`);
@@ -1300,7 +1167,7 @@ async function main(): Promise<void> {
   try {
     while (true) {
       // 清理残留的 _interrupt sentinel，防止空闲期间写入的中断信号影响下一次 query
-      try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+      try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
       state.clearInterruptRequested();
 
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
@@ -1408,9 +1275,9 @@ async function main(): Promise<void> {
           streamEvent: { eventType: 'status', statusText: 'interrupted' },
         });
         // 清理可能残留的 _interrupt 文件
-        try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+        try { fs.unlinkSync(ipcPaths.interruptSentinel); } catch { /* ignore */ }
         // 不 break，等待下一条消息
-        const nextMessage = await waitForIpcMessage();
+        const nextMessage = await waitForIpcMessage(ipcPaths, log, writeOutput, state, IM_CHANNELS_FILE);
         if (nextMessage === null) {
           log('Close sentinel received after interrupt, exiting');
           break;
@@ -1426,7 +1293,7 @@ async function main(): Promise<void> {
       // because the host is waiting for the process to terminate naturally.
       // Check both: the flag set during pollIpcDuringQuery AND the sentinel file
       // (in case it was written after the query's IPC polling stopped).
-      if (queryResult.drainDetectedDuringQuery || shouldDrain()) {
+      if (queryResult.drainDetectedDuringQuery || shouldDrain(ipcPaths)) {
         log('Drain sentinel detected, exiting for turn boundary');
         writeOutput({ status: 'drained', result: null, newSessionId: sessionId });
         process.exit(0);
@@ -1438,7 +1305,7 @@ async function main(): Promise<void> {
       log('Query ended, waiting for next IPC message...');
 
       // Wait for the next message or _close/_drain sentinel
-      const nextMessage = await waitForIpcMessage();
+      const nextMessage = await waitForIpcMessage(ipcPaths, log, writeOutput, state, IM_CHANNELS_FILE);
       if (nextMessage === null) {
         log('Close/drain sentinel received, exiting');
         break;
