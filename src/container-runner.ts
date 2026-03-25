@@ -322,6 +322,14 @@ function buildVolumeMounts(
     envLines.push(`HAPPYCLAW_MODEL=${group.model}`);
   }
 
+  // LLM provider selection (default: claude)
+  const llmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
+  envLines.push(`HAPPYCLAW_LLM_PROVIDER=${llmProvider}`);
+  if (llmProvider === 'codex') {
+    const openaiKey = process.env.OPENAI_API_KEY || '';
+    if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+  }
+
   // Agent-browser isolation: each workspace gets its own browser session + profile
   envLines.push(`AGENT_BROWSER_SESSION=${group.folder}`);
   envLines.push(`AGENT_BROWSER_PROFILE=/workspace/group/.agent-browser-profile`);
@@ -922,6 +930,13 @@ export async function runHostAgent(
     hostEnv['HAPPYCLAW_MODEL'] = group.model;
   }
 
+  // LLM provider selection for host mode
+  const hostLlmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
+  hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
+  if (hostLlmProvider === 'codex' && process.env.OPENAI_API_KEY) {
+    hostEnv['OPENAI_API_KEY'] = process.env.OPENAI_API_KEY;
+  }
+
   // Write .credentials.json for OAuth credentials
   const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
   if (mergedConfig.claudeOAuthCredentials) {
@@ -993,9 +1008,7 @@ export async function runHostAgent(
 
   // 6. 编译检查
   const projectRoot = process.cwd();
-  if (group.llm_provider === 'openai') {
-    logger.warn({ group: group.name }, 'llm_provider=openai but OpenAI runner removed; falling back to Claude');
-  }
+  // llm_provider=openai is now supported via Codex provider
 
   const runnerSubdir = 'agent-runner';
   const agentRunnerRoot = path.join(projectRoot, 'container', runnerSubdir);
