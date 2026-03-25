@@ -16,20 +16,16 @@
 
 import fs from 'fs';
 import path from 'path';
-import { query, createSdkMcpServer, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
-import { createSafetyLiteHook } from './safety-lite.js';
-import { createPreCompactHook } from './transcript-archive.js';
-import { resolveImageMimeType, filterOversizedImages } from './image-utils.js';
+import { createSdkMcpServer, PermissionMode, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 
 import type {
   ContainerInput,
   ContainerOutput,
-  SDKUserMessage,
 } from './types.js';
 export type { StreamEventType, StreamEvent } from './types.js';
 
 import { StreamEventProcessor } from './stream-processor.js';
-import { PREDEFINED_AGENTS } from './agent-definitions.js';
+import { ClaudeSession, type ClaudeSessionConfig } from './claude-session.js';
 import { createContextManager, coreToolsToSdkTools } from './mcp-adapter.js';
 import { SessionState } from './session-state.js';
 import { buildSystemPromptAppend, buildChannelRoutingReminder, normalizeHomeFlags } from './context-builder.js';
@@ -75,75 +71,6 @@ const DEFAULT_ALLOWED_TOOLS = [
   'NotebookEdit',
   'mcp__happyclaw__*'
 ];
-
-/**
- * Push-based async iterable for streaming user messages to the SDK.
- * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
- */
-class MessageStream {
-  private queue: SDKUserMessage[] = [];
-  private waiting: (() => void) | null = null;
-  private done = false;
-
-  push(text: string, images?: Array<{ data: string; mimeType?: string }>): string[] {
-    const rejectedReasons: string[] = [];
-    let filteredImages = images;
-
-    // 过滤超限图片，在发送给 SDK 之前拦截
-    if (filteredImages && filteredImages.length > 0) {
-      const { valid, rejected } = filterOversizedImages(filteredImages, log);
-      rejectedReasons.push(...rejected);
-      filteredImages = valid.length > 0 ? valid : undefined;
-    }
-
-    let content:
-      | string
-      | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }>;
-
-    if (filteredImages && filteredImages.length > 0) {
-      // 多模态消息：text + images
-      content = [
-        { type: 'text', text },
-        ...filteredImages.map((img) => ({
-          type: 'image' as const,
-          source: {
-            type: 'base64' as const,
-            media_type: resolveImageMimeType(img, log),
-            data: img.data,
-          },
-        })),
-      ];
-    } else {
-      // 纯文本消息
-      content = text;
-    }
-
-    this.queue.push({
-      type: 'user',
-      message: { role: 'user', content },
-      parent_tool_use_id: null,
-      session_id: '',
-    });
-    this.waiting?.();
-    return rejectedReasons;
-  }
-
-  end(): void {
-    this.done = true;
-    this.waiting?.();
-  }
-
-  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
-    while (true) {
-      while (this.queue.length > 0) {
-        yield this.queue.shift()!;
-      }
-      if (this.done) return;
-      await new Promise<void>(r => { this.waiting = r; });
-      this.waiting = null;
-    }
-  }
-}
 
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -224,25 +151,24 @@ function loadUserMcpServers(): Record<string, unknown> {
 
 /**
  * Run a single query and stream results via writeOutput.
- * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
- * allowing agent teams subagents to run to completion.
- * Also pipes IPC messages into the stream during the query.
+ * Delegates SDK lifecycle to ClaudeSession (message stream, query(), hooks).
+ * Also pipes IPC messages into the session during the query.
  */
 async function runQuery(
   prompt: string,
   sessionId: string | undefined,
   mcpServerConfig: ReturnType<typeof createSdkMcpServer>,
   containerInput: ContainerInput,
+  session: ClaudeSession,
   resumeAt?: string,
   emitOutput = true,
   allowedTools: string[] = DEFAULT_ALLOWED_TOOLS,
   disallowedTools?: string[],
   images?: Array<{ data: string; mimeType?: string }>,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; lastResumeUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean; drainDetectedDuringQuery?: boolean }> {
-  const stream = new MessageStream();
   // Track IM channels from initial prompt
   state.extractSourceChannels(prompt, IM_CHANNELS_FILE);
-  const initialRejected = stream.push(prompt, images);
+  const initialRejected = session.pushMessage(prompt, images);
   const emit = (output: ContainerOutput): void => {
     if (emitOutput) writeOutput(output);
   };
@@ -304,14 +230,12 @@ async function runQuery(
       }
       interruptedDuringQuery = true;
       waitingForBackgroundTasks = false;
-      queryRef?.interrupt().catch((err: unknown) => log(`Activity timeout interrupt failed: ${err}`));
-      stream.end();
+      session.interrupt().catch((err: unknown) => log(`Activity timeout interrupt failed: ${err}`));
+      session.end();
       ipcPolling = false;
     }, QUERY_ACTIVITY_TIMEOUT_MS);
   };
   resetQueryActivityTimer();
-  // queryRef is set just before the for-await loop so pollIpcDuringQuery can call interrupt()
-  let queryRef: { interrupt(): Promise<void>; setPermissionMode(mode: PermissionMode): Promise<void> } | null = null;
   // Track drain detection during query: if _drain appears while the SDK query
   // is still running, we set this flag and let the query finish naturally.
   // The main loop will check this flag after the for-await loop exits.
@@ -322,7 +246,7 @@ async function runQuery(
     if (shouldClose(ipcPaths)) {
       log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
-      stream.end();
+      session.end();
       ipcPolling = false;
       return;
     }
@@ -338,8 +262,8 @@ async function runQuery(
       log('Interrupt sentinel detected, interrupting current query');
       interruptedDuringQuery = true;
       state.markInterruptRequested();
-      queryRef?.interrupt().catch((err: unknown) => log(`Interrupt call failed: ${err}`));
-      stream.end();
+      session.interrupt().catch((err: unknown) => log(`Interrupt call failed: ${err}`));
+      session.end();
       ipcPolling = false;
       return;
     }
@@ -347,7 +271,7 @@ async function runQuery(
     if (modeChange) {
       state.currentPermissionMode = modeChange as PermissionMode;
       log(`Mode change via IPC: ${modeChange}`);
-      queryRef?.setPermissionMode(modeChange as PermissionMode).catch((err: unknown) =>
+      session.setPermissionMode(modeChange as PermissionMode).catch((err: unknown) =>
         log(`setPermissionMode failed: ${err}`),
       );
     }
@@ -357,7 +281,7 @@ async function runQuery(
       state.extractSourceChannels(msg.text, IM_CHANNELS_FILE);
       // Emit acknowledgement so host can track IPC delivery
       emit({ status: 'stream', result: null, streamEvent: { eventType: 'status', statusText: 'ipc_message_received' } });
-      const rejected = stream.push(msg.text, msg.images);
+      const rejected = session.pushMessage(msg.text, msg.images);
       for (const reason of rejected) {
         emit({ status: 'success', result: `\u26a0\ufe0f ${reason}`, newSessionId: undefined });
       }
@@ -370,7 +294,7 @@ async function runQuery(
   const processor = new StreamEventProcessor(emit, log, (newMode) => {
     state.currentPermissionMode = newMode as PermissionMode;
     log(`Auto mode switch on ${newMode === 'plan' ? 'EnterPlanMode' : 'ExitPlanMode'} detection`);
-    queryRef?.setPermissionMode(newMode as PermissionMode).catch((err: unknown) =>
+    session.setPermissionMode(newMode as PermissionMode).catch((err: unknown) =>
       log(`setPermissionMode failed: ${err}`),
     );
   });
@@ -405,35 +329,28 @@ async function runQuery(
   const extraDirs = [WORKSPACE_GLOBAL, WORKSPACE_MEMORY];
 
   try {
-    const q = query({
-    prompt: stream,
-    options: {
-      model: CLAUDE_MODEL,
+    // Assemble session config — ClaudeSession handles SDK query(), hooks, and agents
+    const sessionConfig: ClaudeSessionConfig = {
+      sessionId,
+      resumeAt,
       cwd: WORKSPACE_GROUP,
       additionalDirectories: extraDirs,
-      resume: sessionId,
-      resumeSessionAt: resumeAt,
-      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: systemPromptAppend },
-      allowedTools,
-      ...(disallowedTools && { disallowedTools }),
-      maxThinkingTokens: 16384,
+      model: CLAUDE_MODEL,
       permissionMode: state.currentPermissionMode,
-      allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
-      includePartialMessages: true,
-      mcpServers: {
-        ...loadUserMcpServers(),     // 用户配置的 MCP（stdio/http/sse），SDK 原生支持
-        happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
-      },
-      hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, containerInput.groupFolder, containerInput.userId)] }],
-        ...(process.env.HAPPYCLAW_HOST_MODE === '1' ? { PreToolUse: [{ hooks: [createSafetyLiteHook()] }] } : {}),
-      },
-      agents: PREDEFINED_AGENTS,
-    }
-  });
-    queryRef = q;
-    for await (const message of q) {
+      allowedTools,
+      disallowedTools,
+      systemPromptAppend,
+      isHostMode: process.env.HAPPYCLAW_HOST_MODE === '1',
+      isHome,
+      isAdminHome,
+      groupFolder: containerInput.groupFolder,
+      userId: containerInput.userId,
+    };
+    const mcpServers: Record<string, McpServerConfig> = {
+      ...loadUserMcpServers() as Record<string, McpServerConfig>,  // 用户配置的 MCP（stdio/http/sse），SDK 原生支持
+      happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
+    };
+    for await (const message of session.run(sessionConfig, mcpServers)) {
     // Reset activity watchdog on every SDK event
     resetQueryActivityTimer();
     // Track tool call start time for hard timeout enforcement:
@@ -548,7 +465,7 @@ async function runQuery(
       } else {
         log('Context compacted, no IM channels tracked');
       }
-      stream.push(buildChannelRoutingReminder(channels));
+      session.pushMessage(buildChannelRoutingReminder(channels));
     }
 
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
@@ -563,7 +480,7 @@ async function runQuery(
       log(`Result #${resultCount}: subtype=${resultSubtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
 
       // ── Error results: always end the stream immediately ──
-      // These paths return/throw, so stream must be closed before exiting.
+      // These paths return/throw, so session must be ended before exiting.
 
       // SDK 在某些失败场景会返回 error_* subtype 且不抛异常。
       // 匹配策略：显式枚举已知的 error subtype，并用 startsWith('error') 兜底。
@@ -571,7 +488,7 @@ async function runQuery(
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
         ipcPolling = false;
-        stream.end();
+        session.end();
         if (!newSessionId) {
           log(`Session resume failed (no init): ${resultSubtype}`);
           return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, sessionResumeFailed: true };
@@ -587,7 +504,7 @@ async function runQuery(
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
         ipcPolling = false;
-        stream.end();
+        session.end();
         log(`Context overflow detected in result: ${textResult.slice(0, 100)}`);
         processor.resetFullTextAccumulator();
         return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery };
@@ -596,7 +513,7 @@ async function runQuery(
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
         ipcPolling = false;
-        stream.end();
+        session.end();
         log(`Unrecoverable transcript error in result: ${textResult.slice(0, 200)}`);
         processor.resetFullTextAccumulator();
         return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery };
@@ -615,12 +532,12 @@ async function runQuery(
         resetQueryActivityTimer();
       } else {
         // No background tasks — safe to end the stream and stop IPC polling.
-        // IPC polling must stop before stream.end() to avoid push-after-close
+        // IPC polling must stop before session.end() to avoid push-after-close
         // crashes on ProcessTransport (see commit c6b5086).
         if (queryActivityTimer) clearTimeout(queryActivityTimer);
         waitingForBackgroundTasks = false;
         ipcPolling = false;
-        stream.end();
+        session.end();
       }
 
       const { effectiveResult } = processor.processResult(textResult);
@@ -783,6 +700,7 @@ async function main(): Promise<void> {
   }
 
   // Query loop: run query -> wait for IPC message -> run new query -> repeat
+  const session = new ClaudeSession(log);
   let resumeAt: string | undefined;
   let overflowRetryCount = 0;
   const MAX_OVERFLOW_RETRIES = 3;
@@ -799,6 +717,7 @@ async function main(): Promise<void> {
         sessionId,
         mcpServerConfig,
         containerInput,
+        session,
         resumeAt,
         true,
         DEFAULT_ALLOWED_TOOLS,
