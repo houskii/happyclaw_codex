@@ -12,7 +12,18 @@ import { createPreCompactHook } from './transcript-archive.js';
 import { createSafetyLiteHook } from './safety-lite.js';
 import { PREDEFINED_AGENTS } from './agent-definitions.js';
 import { resolveImageMimeType, filterOversizedImages } from './image-utils.js';
-import type { SDKUserMessage } from './types.js';
+
+export interface SDKUserMessage {
+  type: 'user';
+  message: {
+    role: 'user';
+    content:
+      | string
+      | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }>;
+  };
+  parent_tool_use_id: null;
+  session_id: string;
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
