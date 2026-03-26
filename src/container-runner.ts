@@ -325,9 +325,40 @@ function buildVolumeMounts(
   // LLM provider selection (default: claude)
   const llmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
   envLines.push(`HAPPYCLAW_LLM_PROVIDER=${llmProvider}`);
+  // Always pass OPENAI_API_KEY so cross-provider invoke_agent (Claude → Codex) works
+  const openaiKey = process.env.OPENAI_API_KEY || '';
+  if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+
   if (llmProvider === 'codex') {
-    const openaiKey = process.env.OPENAI_API_KEY || '';
-    if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+    // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
+    if (group.model) {
+      envLines.push(`HAPPYCLAW_CODEX_MODEL=${group.model}`);
+    }
+    // Persist Codex session data (rollout JSONL + SQLite) so threads survive restarts
+    const codexHomeDir = path.join(DATA_DIR, 'sessions', group.folder, 'codex-home');
+    mkdirForContainer(codexHomeDir);
+    mounts.push({
+      hostPath: codexHomeDir,
+      containerPath: '/workspace/codex-home',
+      readonly: false,
+    });
+    envLines.push('CODEX_HOME=/workspace/codex-home');
+  }
+
+  // Cross-provider invoke_agent: mark Claude as available so Codex can call it
+  const claudeConfigured = !!(globalConfig.anthropicApiKey || globalConfig.claudeCodeOauthToken || globalConfig.claudeOAuthCredentials);
+  if (claudeConfigured) {
+    envLines.push('HAPPYCLAW_CLAUDE_AVAILABLE=1');
+  }
+
+  // Cross-provider invoke_agent: mark Codex as available so Claude can call it
+  if (process.env.OPENAI_API_KEY) {
+    envLines.push('HAPPYCLAW_CODEX_AVAILABLE=1');
+  }
+
+  // Thinking effort (provider-agnostic)
+  if (group.thinking_effort) {
+    envLines.push(`HAPPYCLAW_THINKING_EFFORT=${group.thinking_effort}`);
   }
 
   // Agent-browser isolation: each workspace gets its own browser session + profile
@@ -336,6 +367,7 @@ function buildVolumeMounts(
 
   // Memory Agent env vars (for Docker containers)
   if (ownerId) {
+    envLines.push(`HAPPYCLAW_USER_ID=${ownerId}`);
     const token = getInternalToken();
     if (token) envLines.push(`HAPPYCLAW_INTERNAL_TOKEN=${token}`);
     // Docker containers use host.docker.internal to reach the host
@@ -357,6 +389,19 @@ function buildVolumeMounts(
       containerPath: '/workspace/memory-index',
       readonly: true,
     });
+  }
+
+  // Cross-provider invoke_agent: mount home session dir so Codex sub-agents
+  // get fresh OAuth credentials (same pattern as memory-agent.ts).
+  if (ownerHomeFolder) {
+    const homeClaudeDir = path.join(DATA_DIR, 'sessions', ownerHomeFolder, '.claude');
+    fs.mkdirSync(homeClaudeDir, { recursive: true });
+    mounts.push({
+      hostPath: homeClaudeDir,
+      containerPath: '/workspace/claude-credentials',
+      readonly: true,
+    });
+    envLines.push('HAPPYCLAW_CLAUDE_CREDENTIALS_DIR=/workspace/claude-credentials');
   }
 
   if (envLines.length > 0) {
@@ -390,6 +435,15 @@ function buildVolumeMounts(
         { group: group.name, err },
         'Failed to write .credentials.json',
       );
+    }
+    // Also write to home session dir for cross-provider invoke_agent.
+    // The home Claude session refreshes this file; writing here ensures
+    // at least a bootstrap snapshot exists even if no Claude session ran yet.
+    if (ownerHomeFolder && ownerHomeFolder !== group.folder) {
+      const homeClaudeDir = path.join(DATA_DIR, 'sessions', ownerHomeFolder, '.claude');
+      try {
+        writeCredentialsFile(homeClaudeDir, mergedConfig);
+      } catch { /* non-critical */ }
     }
   }
 
@@ -933,8 +987,35 @@ export async function runHostAgent(
   // LLM provider selection for host mode
   const hostLlmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
   hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
-  if (hostLlmProvider === 'codex' && process.env.OPENAI_API_KEY) {
+  // Always pass OPENAI_API_KEY so cross-provider invoke_agent (Claude → Codex) works
+  if (process.env.OPENAI_API_KEY) {
     hostEnv['OPENAI_API_KEY'] = process.env.OPENAI_API_KEY;
+  }
+
+  if (hostLlmProvider === 'codex') {
+    // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
+    if (group.model) {
+      hostEnv['HAPPYCLAW_CODEX_MODEL'] = group.model;
+    }
+    // Host mode: default ~/.codex/ already persists across restarts.
+    // CODEX_HOME override is only needed for container mode (see buildVolumeMounts).
+  }
+
+  // Cross-provider invoke_agent: mark Claude as available so Codex can call it
+  const hostClaudeConfig = getClaudeProviderConfig();
+  const hostClaudeConfigured = !!(hostClaudeConfig.anthropicApiKey || hostClaudeConfig.claudeCodeOauthToken || hostClaudeConfig.claudeOAuthCredentials);
+  if (hostClaudeConfigured) {
+    hostEnv['HAPPYCLAW_CLAUDE_AVAILABLE'] = '1';
+  }
+
+  // Cross-provider invoke_agent: mark Codex as available so Claude can call it
+  if (process.env.OPENAI_API_KEY) {
+    hostEnv['HAPPYCLAW_CODEX_AVAILABLE'] = '1';
+  }
+
+  // Thinking effort for host mode
+  if (group.thinking_effort) {
+    hostEnv['HAPPYCLAW_THINKING_EFFORT'] = group.thinking_effort;
   }
 
   // Write .credentials.json for OAuth credentials
@@ -947,6 +1028,13 @@ export async function runHostAgent(
         { folder: group.folder, err },
         'Failed to write .credentials.json for host agent',
       );
+    }
+    // Also write to home session dir for cross-provider invoke_agent
+    if (ownerHomeFolder && ownerHomeFolder !== group.folder) {
+      const homeClaudeDir = path.join(DATA_DIR, 'sessions', ownerHomeFolder, '.claude');
+      try {
+        writeCredentialsFile(homeClaudeDir, mergedConfig);
+      } catch { /* non-critical */ }
     }
   }
 
@@ -975,10 +1063,16 @@ export async function runHostAgent(
   if (ownerId) {
     hostEnv['HAPPYCLAW_SKILLS_DIR'] = path.join(DATA_DIR, 'skills', ownerId);
   }
+  hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
   hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
+  // Cross-provider invoke_agent: share home session dir for fresh OAuth tokens
+  // (same pattern as memory-agent.ts — avoids stale refresh tokens)
+  const homeClaudeDir = path.join(DATA_DIR, 'sessions', ownerHomeFolder || group.folder, '.claude');
+  hostEnv['HAPPYCLAW_CLAUDE_CREDENTIALS_DIR'] = homeClaudeDir;
 
   // Memory Agent env vars
   if (ownerId) {
+    hostEnv['HAPPYCLAW_USER_ID'] = ownerId;
     const token = getInternalToken();
     if (token) hostEnv['HAPPYCLAW_INTERNAL_TOKEN'] = token;
     hostEnv['HAPPYCLAW_API_URL'] =

@@ -6,7 +6,7 @@
  * - IPC utilities (read/write/poll)
  * - Plugin system (ContextPlugin, ToolDefinition, ContextManager)
  * - System prompt builder
- * - Built-in plugins (Messaging, Tasks, Groups, Memory, FeishuDocs)
+ * - Built-in plugins (Messaging, Tasks, Groups, Memory)
  * - Utility functions
  */
 
@@ -70,8 +70,7 @@ export { TasksPlugin } from './plugins/tasks.js';
 export { GroupsPlugin } from './plugins/groups.js';
 export { MemoryPlugin } from './plugins/memory.js';
 export type { MemoryPluginOptions } from './plugins/memory.js';
-export { FeishuDocsPlugin } from './plugins/feishu-docs.js';
-export type { FeishuDocsPluginOptions } from './plugins/feishu-docs.js';
+export { SkillsPlugin } from './plugins/skills.js';
 // Utilities
 export {
   shorten,

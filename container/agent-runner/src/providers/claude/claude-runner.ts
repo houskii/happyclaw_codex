@@ -48,6 +48,7 @@ export interface ClaudeRunnerOptions {
   globalDir: string;
   memoryDir: string;
   model: string;
+  thinkingEffort?: string;
   loadUserMcpServers: () => Record<string, unknown>;
   skillsDir: string;
 }
@@ -108,6 +109,11 @@ export class ClaudeRunner implements AgentRunner {
     const { containerInput, groupDir, globalDir, memoryDir } = this.opts;
     const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
 
+    // Build skills directories list (project-level + user-level)
+    const projectSkillsDir = process.env.HAPPYCLAW_PROJECT_SKILLS_DIR || '/workspace/project-skills';
+    const userSkillsDir = this.opts.skillsDir;
+    const skillsDirs = [projectSkillsDir, userSkillsDir].filter(Boolean);
+
     // Create ContextManager with all plugins
     const pluginCtx = {
       chatJid: containerInput.chatJid,
@@ -119,6 +125,7 @@ export class ClaudeRunner implements AgentRunner {
       workspaceGlobal: globalDir,
       workspaceMemory: memoryDir,
       userId: containerInput.userId,
+      skillsDirs,
     };
     this.ctxMgr = createContextManager(pluginCtx);
 
@@ -169,6 +176,7 @@ export class ClaudeRunner implements AgentRunner {
       cwd: opts.groupDir,
       additionalDirectories: extraDirs,
       model: opts.model,
+      thinkingEffort: opts.thinkingEffort,
       permissionMode: (config.permissionMode ?? state.currentPermissionMode) as PermissionMode,
       allowedTools: DEFAULT_ALLOWED_TOOLS,
       disallowedTools: undefined,

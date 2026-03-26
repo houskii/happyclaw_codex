@@ -110,6 +110,7 @@ export interface ClaudeSessionConfig {
   cwd: string;
   additionalDirectories?: string[];
   model?: string;
+  thinkingEffort?: string;
   permissionMode?: PermissionMode;
   allowedTools?: string[];
   disallowedTools?: string[];
@@ -194,7 +195,9 @@ export class ClaudeSession {
           },
           allowedTools: config.allowedTools,
           ...(config.disallowedTools && { disallowedTools: config.disallowedTools }),
-          maxThinkingTokens: 16384,
+          ...(config.thinkingEffort
+            ? { effort: config.thinkingEffort as 'low' | 'medium' | 'high' | 'max' }
+            : {}),
           permissionMode: config.permissionMode ?? 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
           settingSources: ['project', 'user'],
