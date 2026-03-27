@@ -22,6 +22,9 @@ import {
   buildContainerEnvLines,
   getClaudeProviderConfig,
   getContainerEnvConfig,
+  getCodexProviderConfig,
+  detectLocalCodexCli,
+  syncCodexAuthToSession,
   getSystemSettings,
   mergeClaudeEnvConfig,
   shellQuoteEnvLines,
@@ -325,14 +328,20 @@ function buildVolumeMounts(
   // LLM provider selection (default: claude)
   const llmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
   envLines.push(`HAPPYCLAW_LLM_PROVIDER=${llmProvider}`);
-  // Always pass OPENAI_API_KEY so cross-provider invoke_agent (Claude → Codex) works
-  const openaiKey = process.env.OPENAI_API_KEY || '';
+
+  // Codex provider config: read from persistent config, fallback to env var
+  const codexConfig = getCodexProviderConfig();
+  const codexProfile = codexConfig.mode === 'api_key' ? codexConfig.activeProfile : null;
+  const openaiKey = codexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
   if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+  if (codexProfile?.baseUrl) envLines.push(`OPENAI_BASE_URL=${codexProfile.baseUrl}`);
 
   if (llmProvider === 'codex') {
     // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
     if (group.model) {
       envLines.push(`HAPPYCLAW_CODEX_MODEL=${group.model}`);
+    } else if (codexProfile?.defaultModel) {
+      envLines.push(`HAPPYCLAW_CODEX_MODEL=${codexProfile.defaultModel}`);
     }
     // Persist Codex session data (rollout JSONL + SQLite) so threads survive restarts
     const codexHomeDir = path.join(DATA_DIR, 'sessions', group.folder, 'codex-home');
@@ -343,6 +352,17 @@ function buildVolumeMounts(
       readonly: false,
     });
     envLines.push('CODEX_HOME=/workspace/codex-home');
+    // CLI login mode: auto-sync host auth.json to container
+    if (codexConfig.mode === 'cli') {
+      syncCodexAuthToSession(codexHomeDir);
+    }
+  }
+
+  // Inject Codex profile customEnv (already sanitized at save time)
+  if (codexProfile?.customEnv) {
+    for (const [k, v] of Object.entries(codexProfile.customEnv)) {
+      envLines.push(`${k}=${v}`);
+    }
   }
 
   // Cross-provider invoke_agent: mark Claude as available so Codex can call it
@@ -352,7 +372,8 @@ function buildVolumeMounts(
   }
 
   // Cross-provider invoke_agent: mark Codex as available so Claude can call it
-  if (process.env.OPENAI_API_KEY) {
+  const codexAvailable = !!(codexConfig.hasCliAuth || codexProfile?.openaiApiKey || process.env.OPENAI_API_KEY);
+  if (codexAvailable) {
     envLines.push('HAPPYCLAW_CODEX_AVAILABLE=1');
   }
 
@@ -987,18 +1008,29 @@ export async function runHostAgent(
   // LLM provider selection for host mode
   const hostLlmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
   hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
-  // Always pass OPENAI_API_KEY so cross-provider invoke_agent (Claude → Codex) works
-  if (process.env.OPENAI_API_KEY) {
-    hostEnv['OPENAI_API_KEY'] = process.env.OPENAI_API_KEY;
-  }
+
+  // Codex provider config for host mode
+  const hostCodexConfig = getCodexProviderConfig();
+  const hostCodexProfile = hostCodexConfig.mode === 'api_key' ? hostCodexConfig.activeProfile : null;
+  const hostOpenaiKey = hostCodexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
+  if (hostOpenaiKey) hostEnv['OPENAI_API_KEY'] = hostOpenaiKey;
+  if (hostCodexProfile?.baseUrl) hostEnv['OPENAI_BASE_URL'] = hostCodexProfile.baseUrl;
 
   if (hostLlmProvider === 'codex') {
     // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
     if (group.model) {
       hostEnv['HAPPYCLAW_CODEX_MODEL'] = group.model;
+    } else if (hostCodexProfile?.defaultModel) {
+      hostEnv['HAPPYCLAW_CODEX_MODEL'] = hostCodexProfile.defaultModel;
     }
-    // Host mode: default ~/.codex/ already persists across restarts.
-    // CODEX_HOME override is only needed for container mode (see buildVolumeMounts).
+    // Host mode: SDK reads ~/.codex/auth.json directly, no sync needed
+  }
+
+  // Inject Codex profile customEnv (already sanitized at save time)
+  if (hostCodexProfile?.customEnv) {
+    for (const [k, v] of Object.entries(hostCodexProfile.customEnv)) {
+      hostEnv[k] = v;
+    }
   }
 
   // Cross-provider invoke_agent: mark Claude as available so Codex can call it
@@ -1009,7 +1041,8 @@ export async function runHostAgent(
   }
 
   // Cross-provider invoke_agent: mark Codex as available so Claude can call it
-  if (process.env.OPENAI_API_KEY) {
+  const hostCodexAvailable = !!(hostCodexConfig.hasCliAuth || hostCodexProfile?.openaiApiKey || process.env.OPENAI_API_KEY);
+  if (hostCodexAvailable) {
     hostEnv['HAPPYCLAW_CODEX_AVAILABLE'] = '1';
   }
 

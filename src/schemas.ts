@@ -619,3 +619,39 @@ export const WeChatConfigSchema = z.object({
   enabled: z.boolean().optional(),
   clearBotToken: z.boolean().optional(),
 });
+
+// ─── Codex Provider ─────────────────────────────────────────────
+
+export const CodexModeSchema = z.object({
+  mode: z.enum(['cli', 'api_key']),
+});
+
+export const CodexProfileCreateSchema = z.object({
+  name: z.string().min(1).max(64),
+  openaiApiKey: z.string().min(1).max(2000),
+  baseUrl: z.string().max(2000).optional(),
+  defaultModel: z.string().max(128).optional(),
+  customEnv: z
+    .record(z.string().max(256), z.string().max(4096))
+    .optional()
+    .refine((env) => !env || Object.keys(env).length <= 50, {
+      message: 'customEnv must have at most 50 entries',
+    }),
+});
+
+export const CodexProfilePatchSchema = z.object({
+  name: z.string().min(1).max(64).optional(),
+  baseUrl: z.string().max(2000).optional(),
+  defaultModel: z.string().max(128).optional(),
+  customEnv: z
+    .record(z.string().max(256), z.string().max(4096))
+    .optional()
+    .refine((env) => !env || Object.keys(env).length <= 50, {
+      message: 'customEnv must have at most 50 entries',
+    }),
+});
+
+export const CodexProfileSecretsSchema = z.object({
+  openaiApiKey: z.string().max(2000).optional(),
+  clearOpenaiApiKey: z.boolean().optional(),
+});
