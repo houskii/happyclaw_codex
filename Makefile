@@ -127,6 +127,9 @@ typecheck-web:
 typecheck-agent-runner:
 	cd container/agent-runner && $(RUN) tsc --noEmit
 
+test: ## 运行单元测试
+	bun test
+
 format: ## 格式化代码
 	$(PKG) run format
 

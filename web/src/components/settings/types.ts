@@ -108,6 +108,14 @@ export interface SystemSettings {
 
 export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings';
 
+// ─── Channel Card Notification Props ───────────────────────────────────────
+// (DingTalkChannelCard uses old props-based notification; other cards use toast)
+
+export interface SettingsNotification {
+  setNotice: (notice: string | null) => void;
+  setError: (error: string | null) => void;
+}
+
 export function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {
     const msg = (err as { message?: unknown }).message;
