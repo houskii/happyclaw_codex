@@ -187,7 +187,7 @@ const OOM_EXIT_RE = /code 137/;
  * Feed a stream event into a Feishu streaming card controller.
  * Centralizes the event → card mapping for both main and sub-agent handlers.
  */
-function feedStreamEventToCard(
+export function feedStreamEventToCard(
   session: StreamingCardController,
   se: StreamEvent,
   accumulatedText: string,
@@ -850,13 +850,13 @@ function sendImWithFailTracking(
   sendImWithRetry(imJid, text, localImagePaths).catch(() => {});
 }
 
-function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
+export function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
   if (candidate.timestamp > base.timestamp) return true;
   if (candidate.timestamp < base.timestamp) return false;
   return candidate.id > base.id;
 }
 
-function normalizeCursor(value: unknown): MessageCursor {
+export function normalizeCursor(value: unknown): MessageCursor {
   if (typeof value === 'string') {
     return { timestamp: value, id: '' };
   }
@@ -2049,7 +2049,7 @@ function getAvailableGroups(): AvailableGroup[] {
     }));
 }
 
-function escapeXml(s: string): string {
+export function escapeXml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -2057,7 +2057,7 @@ function escapeXml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function formatMessages(messages: NewMessage[], isShared = false): string {
+export function formatMessages(messages: NewMessage[], isShared = false): string {
   const lines = messages.map((m) => {
     const content = isShared ? `[${m.sender_name}] ${m.content}` : m.content;
     const sourceJid = m.source_jid || m.chat_jid;
@@ -2072,7 +2072,7 @@ function formatMessages(messages: NewMessage[], isShared = false): string {
   return `<messages>\n${lines.join('\n')}\n</messages>`;
 }
 
-function collectMessageImages(
+export function collectMessageImages(
   chatJid: string,
   messages: NewMessage[],
 ): Array<{ data: string; mimeType: string }> {
@@ -3553,7 +3553,7 @@ async function sendMessage(
   }
 }
 
-function buildInterruptedReply(
+export function buildInterruptedReply(
   partialText: string,
   thinkingText?: string,
 ): string {
@@ -3572,7 +3572,7 @@ function buildInterruptedReply(
   return parts.join('\n\n');
 }
 
-function buildOverflowPartialReply(partialText: string): string {
+export function buildOverflowPartialReply(partialText: string): string {
   const trimmed = partialText.trimEnd();
   return trimmed
     ? `${trimmed}\n\n---\n*⚠️ 上下文压缩中，稍后自动继续*`
@@ -3636,11 +3636,11 @@ const STREAMING_BUFFER_DIR = path.join(DATA_DIR, 'streaming-buffer');
 const STREAMING_BUFFER_INTERVAL_MS = 5000;
 let streamingBufferInterval: ReturnType<typeof setInterval> | null = null;
 
-function encodeJidForFilename(jid: string): string {
+export function encodeJidForFilename(jid: string): string {
   return Buffer.from(jid).toString('base64url');
 }
 
-function decodeJidFromFilename(filename: string): string {
+export function decodeJidFromFilename(filename: string): string {
   const name = filename.endsWith('.txt') ? filename.slice(0, -4) : filename;
   return Buffer.from(name, 'base64url').toString();
 }
@@ -3778,7 +3778,7 @@ function stopStreamingBuffer(): void {
  * - Non-home groups can only send to groups sharing the same folder.
  * - Member home groups can send to groups created by the same user.
  */
-function canSendCrossGroupMessage(
+export function canSendCrossGroupMessage(
   isAdminHome: boolean,
   isHome: boolean,
   sourceFolder: string,
