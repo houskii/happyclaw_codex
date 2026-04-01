@@ -469,7 +469,7 @@ function normalizeProfileId(input: unknown): string {
 
 function sanitizeCustomEnvMap(
   input: Record<string, string>,
-  options?: { skipReservedClaudeKeys?: boolean },
+  options?: { skipReservedClaudeKeys?: boolean; skipReservedCodexKeys?: boolean },
 ): Record<string, string> {
   const entries = Object.entries(input);
   if (entries.length > MAX_CUSTOM_ENV_ENTRIES) {
@@ -484,6 +484,9 @@ function sanitizeCustomEnvMap(
       throw new Error(`Invalid env key: ${key}`);
     }
     if (options?.skipReservedClaudeKeys && RESERVED_CLAUDE_ENV_KEYS.has(key)) {
+      continue;
+    }
+    if (options?.skipReservedCodexKeys && RESERVED_CODEX_ENV_KEYS.has(key)) {
       continue;
     }
     out[key] = sanitizeEnvValue(
@@ -3637,4 +3640,556 @@ export function saveSystemSettings(
   }
 
   return merged;
+}
+// ─── User IM Preferences ─────────────────────────────────────────
+
+export interface UserIMPreferences {
+  autoCreateWorkspaceForGroups?: boolean;
+  autoCreateExecutionMode?: 'host' | 'container';
+}
+
+export function getUserIMPreferences(userId: string): UserIMPreferences {
+  const filePath = path.join(userImDir(userId), 'preferences.json');
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(content) as UserIMPreferences;
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user IM preferences');
+    return {};
+  }
+}
+
+export function saveUserIMPreferences(
+  userId: string,
+  prefs: UserIMPreferences,
+): UserIMPreferences {
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'preferences.json');
+  const merged: UserIMPreferences = {
+    ...getUserIMPreferences(userId),
+    ...prefs,
+  };
+  fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+  return merged;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ─── Codex Provider Config ──────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
+const CODEX_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'codex-provider.json');
+const CODEX_CONFIG_AUDIT_FILE = path.join(
+  CLAUDE_CONFIG_DIR,
+  'codex-provider.audit.log',
+);
+const MAX_CODEX_PROFILES = 20;
+const RESERVED_CODEX_ENV_KEYS = new Set([
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'HAPPYCLAW_CODEX_MODEL',
+]);
+
+export type CodexProviderMode = 'cli' | 'api_key';
+
+interface CodexSecretPayload {
+  openaiApiKey: string;
+}
+
+export interface CodexProviderProfile {
+  id: string;
+  name: string;
+  openaiApiKey: string;
+  baseUrl: string;
+  defaultModel: string;
+  updatedAt: string | null;
+  customEnv: Record<string, string>;
+}
+
+export interface CodexProviderProfilePublic {
+  id: string;
+  name: string;
+  hasOpenaiApiKey: boolean;
+  openaiApiKeyMasked: string | null;
+  baseUrl: string;
+  defaultModel: string;
+  updatedAt: string | null;
+  customEnv: Record<string, string>;
+}
+
+interface StoredCodexProfileV1 {
+  id: string;
+  name: string;
+  baseUrl: string;
+  defaultModel: string;
+  updatedAt: string;
+  secrets: EncryptedSecrets;
+  customEnv?: Record<string, string>;
+}
+
+interface StoredCodexProviderConfigV1 {
+  version: 1;
+  mode: CodexProviderMode;
+  activeProfileId: string;
+  profiles: StoredCodexProfileV1[];
+}
+
+export interface LocalCodexCliStatus {
+  detected: boolean;
+  hasAuth: boolean;
+  authMode: string | null;
+  accountId: string | null;
+  lastRefresh: string | null;
+}
+
+interface CodexStoredStateResolved {
+  mode: CodexProviderMode;
+  activeProfileId: string;
+  profiles: StoredCodexProfileV1[];
+}
+
+// ─── Codex encryption ───────────────────────────────────────────
+
+function encryptCodexSecret(payload: CodexSecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptCodexSecret(secrets: EncryptedSecrets): CodexSecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+  const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+
+  return {
+    openaiApiKey: typeof parsed.openaiApiKey === 'string' ? parsed.openaiApiKey : '',
+  };
+}
+
+// ─── Codex profile serialization ────────────────────────────────
+
+function toStoredCodexProfile(profile: CodexProviderProfile): StoredCodexProfileV1 {
+  return {
+    id: profile.id,
+    name: profile.name,
+    baseUrl: profile.baseUrl,
+    defaultModel: profile.defaultModel,
+    updatedAt: profile.updatedAt || new Date().toISOString(),
+    secrets: encryptCodexSecret({ openaiApiKey: profile.openaiApiKey }),
+    ...(Object.keys(profile.customEnv || {}).length > 0
+      ? { customEnv: profile.customEnv }
+      : {}),
+  };
+}
+
+function fromStoredCodexProfile(stored: StoredCodexProfileV1): CodexProviderProfile {
+  const secrets = decryptCodexSecret(stored.secrets);
+  return {
+    id: stored.id,
+    name: stored.name,
+    openaiApiKey: secrets.openaiApiKey,
+    baseUrl: stored.baseUrl || '',
+    defaultModel: stored.defaultModel || '',
+    updatedAt: stored.updatedAt || null,
+    customEnv: stored.customEnv || {},
+  };
+}
+
+export function toPublicCodexProfile(
+  profile: CodexProviderProfile,
+): CodexProviderProfilePublic {
+  return {
+    id: profile.id,
+    name: profile.name,
+    hasOpenaiApiKey: !!profile.openaiApiKey,
+    openaiApiKeyMasked: maskSecret(profile.openaiApiKey),
+    baseUrl: profile.baseUrl,
+    defaultModel: profile.defaultModel,
+    updatedAt: profile.updatedAt,
+    customEnv: profile.customEnv || {},
+  };
+}
+
+// ─── Codex stored state read/write ──────────────────────────────
+
+function readCodexStoredState(): CodexStoredStateResolved | null {
+  if (!fs.existsSync(CODEX_CONFIG_FILE)) return null;
+  try {
+    const content = fs.readFileSync(CODEX_CONFIG_FILE, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+
+    if (parsed.version === 1) {
+      const v1 = parsed as unknown as StoredCodexProviderConfigV1;
+      return {
+        mode: v1.mode === 'api_key' ? 'api_key' : 'cli',
+        activeProfileId: typeof v1.activeProfileId === 'string' ? v1.activeProfileId : '',
+        profiles: Array.isArray(v1.profiles) ? v1.profiles : [],
+      };
+    }
+    return null;
+  } catch (err) {
+    logger.error(
+      { err, file: CODEX_CONFIG_FILE },
+      'Failed to read Codex provider config',
+    );
+    return null;
+  }
+}
+
+function writeCodexStoredState(state: CodexStoredStateResolved): void {
+  const payload: StoredCodexProviderConfigV1 = {
+    version: 1,
+    mode: state.mode,
+    activeProfileId: state.activeProfileId,
+    profiles: state.profiles,
+  };
+
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const tmp = `${CODEX_CONFIG_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, CODEX_CONFIG_FILE);
+}
+
+function ensureCodexState(): CodexStoredStateResolved {
+  return readCodexStoredState() || { mode: 'cli', activeProfileId: '', profiles: [] };
+}
+
+// ─── Codex CLI detection (read-only) ────────────────────────────
+
+/**
+ * Read and parse ~/.codex/auth.json.
+ * Returns the raw parsed JSON object, or null if missing/invalid.
+ */
+export function readLocalCodexAuth(): Record<string, unknown> | null {
+  const homeDir = process.env.HOME || '/root';
+  const authFile = path.join(
+    process.env.CODEX_HOME || path.join(homeDir, '.codex'),
+    'auth.json',
+  );
+  try {
+    if (!fs.existsSync(authFile)) return null;
+    const content = JSON.parse(fs.readFileSync(authFile, 'utf-8'));
+    if (typeof content !== 'object' || content === null) return null;
+    return content as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export function detectLocalCodexCli(): LocalCodexCliStatus {
+  const homeDir = process.env.HOME || '/root';
+  const codexHome = process.env.CODEX_HOME || path.join(homeDir, '.codex');
+
+  const auth = readLocalCodexAuth();
+  if (auth && auth.tokens && typeof auth.tokens === 'object') {
+    const tokens = auth.tokens as Record<string, unknown>;
+    const accountId = typeof tokens.account_id === 'string' ? tokens.account_id : null;
+    return {
+      detected: true,
+      hasAuth: true,
+      authMode: typeof auth.auth_mode === 'string' ? auth.auth_mode : null,
+      accountId: accountId ? maskSecret(accountId) : null,
+      lastRefresh: typeof auth.last_refresh === 'string' ? auth.last_refresh : null,
+    };
+  }
+
+  // Check if directory exists at all
+  const dirExists = fs.existsSync(codexHome);
+  return {
+    detected: dirExists,
+    hasAuth: false,
+    authMode: null,
+    accountId: null,
+    lastRefresh: null,
+  };
+}
+
+/**
+ * Copy host's ~/.codex/auth.json to a session's codex-home directory.
+ * Skips if on-disk version is newer (container SDK may have refreshed).
+ */
+export function syncCodexAuthToSession(codexHomeDir: string): boolean {
+  const hostAuth = readLocalCodexAuth();
+  if (!hostAuth) return false;
+
+  const filePath = path.join(codexHomeDir, 'auth.json');
+
+  // Don't overwrite if existing file has a newer last_refresh
+  try {
+    if (fs.existsSync(filePath)) {
+      const existing = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const existingRefresh = existing?.last_refresh;
+      const hostRefresh = hostAuth.last_refresh;
+      if (
+        typeof existingRefresh === 'string' &&
+        typeof hostRefresh === 'string' &&
+        existingRefresh > hostRefresh
+      ) {
+        return true; // on-disk is newer, skip
+      }
+    }
+  } catch {
+    // Can't read existing — proceed with write
+  }
+
+  try {
+    fs.mkdirSync(codexHomeDir, { recursive: true });
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(hostAuth, null, 2) + '\n', {
+      encoding: 'utf-8',
+      mode: 0o644,
+    });
+    fs.renameSync(tmp, filePath);
+    return true;
+  } catch (err) {
+    logger.warn({ err, codexHomeDir }, 'Failed to sync Codex auth to session');
+    return false;
+  }
+}
+
+// ─── Codex mode & config getters ────────────────────────────────
+
+export function getCodexMode(): CodexProviderMode {
+  const state = readCodexStoredState();
+  return state?.mode || 'cli';
+}
+
+export function setCodexMode(mode: CodexProviderMode): void {
+  const state = ensureCodexState();
+  writeCodexStoredState({ ...state, mode });
+}
+
+export interface CodexProviderConfigResult {
+  mode: CodexProviderMode;
+  activeProfile: CodexProviderProfile | null;
+  hasCliAuth: boolean;
+  hasEnvApiKey: boolean;
+}
+
+export function getCodexProviderConfig(): CodexProviderConfigResult {
+  const state = readCodexStoredState();
+  const mode = state?.mode || 'cli';
+  const cliStatus = detectLocalCodexCli();
+  const hasEnvApiKey = !!process.env.OPENAI_API_KEY;
+
+  if (mode === 'api_key' && state && state.activeProfileId) {
+    const stored = state.profiles.find((p) => p.id === state.activeProfileId);
+    return {
+      mode,
+      activeProfile: stored ? fromStoredCodexProfile(stored) : null,
+      hasCliAuth: cliStatus.hasAuth,
+      hasEnvApiKey,
+    };
+  }
+
+  return {
+    mode,
+    activeProfile: null,
+    hasCliAuth: cliStatus.hasAuth,
+    hasEnvApiKey,
+  };
+}
+
+// ─── Codex profile CRUD ─────────────────────────────────────────
+
+export function listCodexProfiles(): {
+  activeProfileId: string;
+  profiles: CodexProviderProfile[];
+} {
+  const state = readCodexStoredState();
+  if (!state) return { activeProfileId: '', profiles: [] };
+  return {
+    activeProfileId: state.activeProfileId,
+    profiles: state.profiles.map((p) => fromStoredCodexProfile(p)),
+  };
+}
+
+export function createCodexProfile(input: {
+  name: string;
+  openaiApiKey: string;
+  baseUrl?: string;
+  defaultModel?: string;
+  customEnv?: Record<string, string>;
+}): CodexProviderProfile {
+  const state = ensureCodexState();
+
+  if (state.profiles.length >= MAX_CODEX_PROFILES) {
+    throw new Error(`最多只能创建 ${MAX_CODEX_PROFILES} 个 Codex 配置`);
+  }
+
+  const now = new Date().toISOString();
+  const profile: CodexProviderProfile = {
+    id: crypto.randomBytes(8).toString('hex'),
+    name: normalizeProfileName(input.name),
+    openaiApiKey: normalizeSecret(input.openaiApiKey, 'openaiApiKey'),
+    baseUrl: normalizeBaseUrl(input.baseUrl ?? ''),
+    defaultModel: normalizeModel(input.defaultModel ?? ''),
+    updatedAt: now,
+    customEnv: sanitizeCustomEnvMap(input.customEnv || {}, {
+      skipReservedCodexKeys: true,
+    }),
+  };
+
+  const isFirst = state.profiles.length === 0;
+  writeCodexStoredState({
+    ...state,
+    activeProfileId: isFirst ? profile.id : state.activeProfileId,
+    profiles: [...state.profiles, toStoredCodexProfile(profile)],
+  });
+
+  return profile;
+}
+
+export function updateCodexProfile(
+  profileId: string,
+  patch: {
+    name?: string;
+    baseUrl?: string;
+    defaultModel?: string;
+    customEnv?: Record<string, string>;
+  },
+): CodexProviderProfile {
+  const state = readCodexStoredState();
+  if (!state) throw new Error('Codex 配置不存在');
+
+  const id = normalizeProfileId(profileId);
+  const current = state.profiles.find((p) => p.id === id);
+  if (!current) throw new Error('未找到指定 Codex 配置');
+
+  const decoded = fromStoredCodexProfile(current);
+  const next: CodexProviderProfile = {
+    ...decoded,
+    name: patch.name !== undefined ? normalizeProfileName(patch.name) : decoded.name,
+    baseUrl: patch.baseUrl !== undefined ? normalizeBaseUrl(patch.baseUrl) : decoded.baseUrl,
+    defaultModel: patch.defaultModel !== undefined ? normalizeModel(patch.defaultModel) : decoded.defaultModel,
+    customEnv: patch.customEnv !== undefined
+      ? sanitizeCustomEnvMap(patch.customEnv, { skipReservedCodexKeys: true })
+      : decoded.customEnv,
+    updatedAt: new Date().toISOString(),
+  };
+
+  writeCodexStoredState({
+    ...state,
+    profiles: state.profiles.map((p) =>
+      p.id === id ? toStoredCodexProfile(next) : p,
+    ),
+  });
+
+  return next;
+}
+
+export function updateCodexProfileSecret(
+  profileId: string,
+  patch: {
+    openaiApiKey?: string;
+    clearOpenaiApiKey?: boolean;
+  },
+): CodexProviderProfile {
+  const state = readCodexStoredState();
+  if (!state) throw new Error('Codex 配置不存在');
+
+  const id = normalizeProfileId(profileId);
+  const current = state.profiles.find((p) => p.id === id);
+  if (!current) throw new Error('未找到指定 Codex 配置');
+
+  const decoded = fromStoredCodexProfile(current);
+  const nextKey =
+    typeof patch.openaiApiKey === 'string'
+      ? normalizeSecret(patch.openaiApiKey, 'openaiApiKey')
+      : patch.clearOpenaiApiKey
+        ? ''
+        : decoded.openaiApiKey;
+
+  const next: CodexProviderProfile = {
+    ...decoded,
+    openaiApiKey: nextKey,
+    updatedAt: new Date().toISOString(),
+  };
+
+  writeCodexStoredState({
+    ...state,
+    profiles: state.profiles.map((p) =>
+      p.id === id ? toStoredCodexProfile(next) : p,
+    ),
+  });
+
+  return next;
+}
+
+export function activateCodexProfile(profileId: string): CodexProviderProfile {
+  const state = readCodexStoredState();
+  if (!state) throw new Error('Codex 配置不存在');
+
+  const id = normalizeProfileId(profileId);
+  const target = state.profiles.find((p) => p.id === id);
+  if (!target) throw new Error('未找到指定 Codex 配置');
+
+  writeCodexStoredState({ ...state, activeProfileId: id });
+  return fromStoredCodexProfile(target);
+}
+
+export function deleteCodexProfile(profileId: string): {
+  activeProfileId: string;
+  deletedProfileId: string;
+} {
+  const state = readCodexStoredState();
+  if (!state) throw new Error('Codex 配置不存在');
+
+  const id = normalizeProfileId(profileId);
+  if (!state.profiles.some((p) => p.id === id)) {
+    throw new Error('未找到指定 Codex 配置');
+  }
+  if (state.profiles.length <= 1) {
+    throw new Error('至少需要保留一个 Codex 配置');
+  }
+
+  const profiles = state.profiles.filter((p) => p.id !== id);
+  const activeProfileId =
+    state.activeProfileId === id ? profiles[0].id : state.activeProfileId;
+
+  writeCodexStoredState({ ...state, activeProfileId, profiles });
+
+  return { activeProfileId, deletedProfileId: id };
+}
+
+export function appendCodexConfigAudit(
+  actor: string,
+  action: string,
+  changedFields: string[],
+  metadata?: Record<string, unknown>,
+): void {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    actor,
+    action,
+    changedFields,
+    metadata,
+  };
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  fs.appendFileSync(
+    CODEX_CONFIG_AUDIT_FILE,
+    `${JSON.stringify(entry)}\n`,
+    'utf-8',
+  );
 }

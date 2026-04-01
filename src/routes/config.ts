@@ -19,6 +19,13 @@ import {
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import {
   ClaudeCustomEnvSchema,
+  ClaudeThirdPartyProfileCreateSchema,
+  ClaudeThirdPartyProfilePatchSchema,
+  ClaudeThirdPartyProfileSecretsSchema,
+  CodexModeSchema,
+  CodexProfileCreateSchema,
+  CodexProfilePatchSchema,
+  CodexProfileSecretsSchema,
   FeishuConfigSchema,
   TelegramConfigSchema,
   QQConfigSchema,
@@ -72,6 +79,17 @@ import {
   getUserDingTalkConfig,
   saveUserDingTalkConfig,
   updateAllSessionCredentials,
+  setCodexMode,
+  getCodexProviderConfig,
+  detectLocalCodexCli,
+  listCodexProfiles,
+  toPublicCodexProfile,
+  createCodexProfile,
+  updateCodexProfile,
+  updateCodexProfileSecret,
+  activateCodexProfile,
+  deleteCodexProfile,
+  appendCodexConfigAudit,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
@@ -197,7 +215,282 @@ setInterval(() => {
 
 // --- Routes ---
 
-// ─── GET /claude — 兼容：返回第一个启用供应商的公开配置 ─────
+// GET /api/config/codex/models — 动态读取 Codex 支持的模型列表
+configRoutes.get('/codex/models', authMiddleware, async (c) => {
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const cacheFile = path.join(os.homedir(), '.codex', 'models_cache.json');
+
+  try {
+    if (!fs.existsSync(cacheFile)) {
+      return c.json({ models: [], source: 'fallback' });
+    }
+    const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
+    const models = (raw.models || [])
+      .filter((m: { visibility?: string }) => m.visibility === 'list')
+      .map((m: {
+        slug: string;
+        display_name?: string;
+        description?: string;
+        priority?: number;
+        default_reasoning_level?: string;
+        supported_reasoning_levels?: Array<{ effort: string }>;
+      }) => ({
+        slug: m.slug,
+        displayName: m.display_name || m.slug,
+        description: m.description || '',
+        priority: m.priority ?? 999,
+        defaultReasoningLevel: m.default_reasoning_level,
+        supportedReasoningLevels: (m.supported_reasoning_levels || []).map(
+          (r: { effort: string }) => r.effort,
+        ),
+      }))
+      .sort((a: { priority: number }, b: { priority: number }) => a.priority - b.priority);
+    return c.json({ models, source: 'cache', fetchedAt: raw.fetched_at });
+  } catch (err) {
+    logger.error({ err }, 'Failed to read Codex models cache');
+    return c.json({ models: [], source: 'error' });
+  }
+});
+
+// ─── Codex Provider Config Routes ───────────────────────────────
+
+configRoutes.get('/codex', authMiddleware, systemConfigMiddleware, (c) => {
+  try {
+    const config = getCodexProviderConfig();
+    const cliStatus = detectLocalCodexCli();
+    return c.json({
+      mode: config.mode,
+      hasCliAuth: config.hasCliAuth,
+      cliAuthMode: cliStatus.authMode,
+      cliAuthAccountId: cliStatus.accountId,
+      cliAuthLastRefresh: cliStatus.lastRefresh,
+      hasEnvApiKey: config.hasEnvApiKey,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load Codex config');
+    return c.json({ error: 'Failed to load Codex config' }, 500);
+  }
+});
+
+configRoutes.post(
+  '/codex/mode',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const body = await c.req.json();
+      const parsed = CodexModeSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json({ error: parsed.error.message }, 400);
+      }
+      setCodexMode(parsed.data.mode);
+      const user = c.get('user') as AuthUser;
+      appendCodexConfigAudit(user.username, 'set_mode', ['mode'], {
+        mode: parsed.data.mode,
+      });
+      return c.json({ success: true, mode: parsed.data.mode });
+    } catch (err) {
+      logger.error({ err }, 'Failed to set Codex mode');
+      return c.json({ error: 'Failed to set Codex mode' }, 500);
+    }
+  },
+);
+
+configRoutes.get(
+  '/codex/detect-local',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    return c.json(detectLocalCodexCli());
+  },
+);
+
+configRoutes.get(
+  '/codex/profiles',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    try {
+      const { activeProfileId, profiles } = listCodexProfiles();
+      return c.json({
+        activeProfileId,
+        profiles: profiles.map(toPublicCodexProfile),
+      });
+    } catch (err) {
+      logger.error({ err }, 'Failed to list Codex profiles');
+      return c.json({ error: 'Failed to list Codex profiles' }, 500);
+    }
+  },
+);
+
+configRoutes.post(
+  '/codex/profiles',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const body = await c.req.json();
+      const parsed = CodexProfileCreateSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json({ error: parsed.error.message }, 400);
+      }
+      const profile = createCodexProfile(parsed.data);
+      const user = c.get('user') as AuthUser;
+      appendCodexConfigAudit(user.username, 'create_profile', ['name', 'baseUrl', 'defaultModel'], {
+        profileId: profile.id,
+        profileName: profile.name,
+      });
+      return c.json(toPublicCodexProfile(profile));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to create Codex profile';
+      return c.json({ error: msg }, 400);
+    }
+  },
+);
+
+configRoutes.patch(
+  '/codex/profiles/:id',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const id = c.req.param('id');
+      const body = await c.req.json();
+      const parsed = CodexProfilePatchSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json({ error: parsed.error.message }, 400);
+      }
+      const profile = updateCodexProfile(id, parsed.data);
+      const user = c.get('user') as AuthUser;
+      appendCodexConfigAudit(user.username, 'update_profile', Object.keys(parsed.data), {
+        profileId: profile.id,
+        profileName: profile.name,
+      });
+      return c.json(toPublicCodexProfile(profile));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to update Codex profile';
+      return c.json({ error: msg }, 400);
+    }
+  },
+);
+
+configRoutes.put(
+  '/codex/profiles/:id/secrets',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const id = c.req.param('id');
+      const body = await c.req.json();
+      const parsed = CodexProfileSecretsSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json({ error: parsed.error.message }, 400);
+      }
+      const profile = updateCodexProfileSecret(id, parsed.data);
+      const user = c.get('user') as AuthUser;
+      appendCodexConfigAudit(user.username, 'update_profile_secret', ['openaiApiKey'], {
+        profileId: profile.id,
+      });
+      return c.json(toPublicCodexProfile(profile));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to update Codex profile secret';
+      return c.json({ error: msg }, 400);
+    }
+  },
+);
+
+configRoutes.post(
+  '/codex/profiles/:id/activate',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const id = c.req.param('id');
+      const { activeProfileId: prevId } = listCodexProfiles();
+      const alreadyActive = prevId === id;
+      const profile = activateCodexProfile(id);
+
+      if (!alreadyActive) {
+        const user = c.get('user') as AuthUser;
+        appendCodexConfigAudit(user.username, 'activate_profile', ['activeProfileId'], {
+          profileId: profile.id,
+          profileName: profile.name,
+          previousProfileId: prevId,
+        });
+      }
+
+      // Also stop all running groups so they pick up new config on restart
+      let stoppedCount = 0;
+      let failedCount = 0;
+      if (!alreadyActive && deps) {
+        const groupJids = Object.keys(deps.getRegisteredGroups());
+        const results = await Promise.allSettled(
+          groupJids.map((jid: string) => deps.queue.stopGroup(jid)),
+        );
+        failedCount = results.filter((r: PromiseSettledResult<unknown>) => r.status === 'rejected').length;
+        stoppedCount = groupJids.length - failedCount;
+      }
+
+      return c.json({
+        success: true,
+        alreadyActive,
+        activeProfileId: profile.id,
+        profile: toPublicCodexProfile(profile),
+        stoppedCount,
+        failedCount,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to activate Codex profile';
+      return c.json({ error: msg }, 400);
+    }
+  },
+);
+
+configRoutes.delete(
+  '/codex/profiles/:id',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    try {
+      const id = c.req.param('id');
+      const result = deleteCodexProfile(id);
+      const user = c.get('user') as AuthUser;
+      appendCodexConfigAudit(user.username, 'delete_profile', ['profiles'], {
+        deletedProfileId: result.deletedProfileId,
+      });
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to delete Codex profile';
+      return c.json({ error: msg }, 400);
+    }
+  },
+);
+
+configRoutes.post(
+  '/codex/apply',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      if (!deps) throw new Error('Server not initialized');
+      const groupJids = Object.keys(deps.getRegisteredGroups());
+      const results = await Promise.allSettled(
+        groupJids.map((jid: string) => deps.queue.stopGroup(jid)),
+      );
+      const failedCount = results.filter((r: PromiseSettledResult<unknown>) => r.status === 'rejected').length;
+      const stoppedCount = groupJids.length - failedCount;
+      const user = c.get('user') as AuthUser;
+      appendCodexConfigAudit(user.username, 'apply', [], { stoppedCount, failedCount });
+      return c.json({ success: failedCount === 0, stoppedCount, failedCount });
+    } catch (err) {
+      logger.error({ err }, 'Failed to apply Codex config');
+      return c.json({ error: 'Failed to apply Codex config' }, 500);
+    }
+  },
+);
+
 configRoutes.get('/claude', authMiddleware, systemConfigMiddleware, (c) => {
   try {
     return c.json(toPublicClaudeProviderConfig(getClaudeProviderConfig()));

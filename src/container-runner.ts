@@ -25,6 +25,8 @@ import {
   getContainerEnvConfig,
   getEnabledProviders,
   getBalancingConfig,
+  getCodexProviderConfig,
+  syncCodexAuthToSession,
   getSystemSettings,
   mergeClaudeEnvConfig,
   resolveProviderById,
@@ -360,9 +362,68 @@ function buildVolumeMounts(
   // LLM provider selection (default: claude)
   const llmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
   envLines.push(`HAPPYCLAW_LLM_PROVIDER=${llmProvider}`);
+
+  // Codex provider config: read from persistent config, fallback to env var
+  const codexConfig = getCodexProviderConfig();
+  const codexProfile =
+    codexConfig.mode === 'api_key' ? codexConfig.activeProfile : null;
+  const openaiKey =
+    codexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
+  if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+  if (codexProfile?.baseUrl) envLines.push(`OPENAI_BASE_URL=${codexProfile.baseUrl}`);
+
   if (llmProvider === 'codex') {
-    const openaiKey = process.env.OPENAI_API_KEY || '';
-    if (openaiKey) envLines.push(`OPENAI_API_KEY=${openaiKey}`);
+    // Pass workspace model as Codex model (separate from HAPPYCLAW_MODEL used by Claude)
+    if (group.model) {
+      envLines.push(`HAPPYCLAW_CODEX_MODEL=${group.model}`);
+    } else if (codexProfile?.defaultModel) {
+      envLines.push(`HAPPYCLAW_CODEX_MODEL=${codexProfile.defaultModel}`);
+    }
+    // Persist Codex session data (rollout JSONL + SQLite) so threads survive restarts
+    const codexHomeDir = path.join(DATA_DIR, 'sessions', group.folder, 'codex-home');
+    mkdirForContainer(codexHomeDir);
+    mounts.push({
+      hostPath: codexHomeDir,
+      containerPath: '/workspace/codex-home',
+      readonly: false,
+    });
+    envLines.push('CODEX_HOME=/workspace/codex-home');
+    // CLI login mode: auto-sync host auth.json to container
+    if (codexConfig.mode === 'cli') {
+      syncCodexAuthToSession(codexHomeDir);
+    }
+  }
+
+  // Inject Codex profile customEnv (already sanitized at save time)
+  if (codexProfile?.customEnv) {
+    for (const [k, v] of Object.entries(codexProfile.customEnv)) {
+      envLines.push(`${k}=${v}`);
+    }
+  }
+
+  // Cross-provider invoke_agent: mark Claude as available so Codex can call it
+  const claudeConfigured = !!(
+    globalConfig.anthropicApiKey ||
+    globalConfig.claudeCodeOauthToken ||
+    globalConfig.claudeOAuthCredentials
+  );
+  if (claudeConfigured) {
+    envLines.push('HAPPYCLAW_CLAUDE_AVAILABLE=1');
+  }
+
+  // Cross-provider invoke_agent: mark Codex as available so Claude can call it
+  const codexAvailable = !!(
+    codexConfig.hasCliAuth ||
+    codexProfile?.openaiApiKey ||
+    process.env.OPENAI_API_KEY
+  );
+  if (codexAvailable) {
+    envLines.push('HAPPYCLAW_CODEX_AVAILABLE=1');
+  }
+
+  // Thinking effort (provider-agnostic)
+  if (group.thinking_effort) {
+    envLines.push(`HAPPYCLAW_THINKING_EFFORT=${group.thinking_effort}`);
   }
 
   // Agent-browser isolation: each workspace gets its own browser session + profile
@@ -1020,16 +1081,62 @@ export async function runHostAgent(
       }
     }
 
-    // Per-workspace model override (takes priority over global and container-env config)
     if (group.model) {
       hostEnv['HAPPYCLAW_MODEL'] = group.model;
     }
 
-    // LLM provider selection for host mode
-    const hostLlmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
+    const hostLlmProvider =
+      group.llm_provider === 'openai' ? 'codex' : 'claude';
     hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
-    if (process.env.OPENAI_API_KEY) {
-      hostEnv['OPENAI_API_KEY'] = process.env.OPENAI_API_KEY;
+
+    const hostCodexConfig = getCodexProviderConfig();
+    const hostCodexProfile =
+      hostCodexConfig.mode === 'api_key'
+        ? hostCodexConfig.activeProfile
+        : null;
+    const hostOpenaiKey =
+      hostCodexProfile?.openaiApiKey || process.env.OPENAI_API_KEY || '';
+    if (hostOpenaiKey) {
+      hostEnv['OPENAI_API_KEY'] = hostOpenaiKey;
+    }
+    if (hostCodexProfile?.baseUrl) {
+      hostEnv['OPENAI_BASE_URL'] = hostCodexProfile.baseUrl;
+    }
+
+    if (hostLlmProvider === 'codex') {
+      if (group.model) {
+        hostEnv['HAPPYCLAW_CODEX_MODEL'] = group.model;
+      } else if (hostCodexProfile?.defaultModel) {
+        hostEnv['HAPPYCLAW_CODEX_MODEL'] = hostCodexProfile.defaultModel;
+      }
+    }
+
+    if (hostCodexProfile?.customEnv) {
+      for (const [k, v] of Object.entries(hostCodexProfile.customEnv)) {
+        hostEnv[k] = v;
+      }
+    }
+
+    const hostClaudeConfigured = !!(
+      globalConfig.anthropicApiKey ||
+      globalConfig.claudeCodeOauthToken ||
+      globalConfig.claudeOAuthCredentials
+    );
+    if (hostClaudeConfigured) {
+      hostEnv['HAPPYCLAW_CLAUDE_AVAILABLE'] = '1';
+    }
+
+    const hostCodexAvailable = !!(
+      hostCodexConfig.hasCliAuth ||
+      hostCodexProfile?.openaiApiKey ||
+      process.env.OPENAI_API_KEY
+    );
+    if (hostCodexAvailable) {
+      hostEnv['HAPPYCLAW_CODEX_AVAILABLE'] = '1';
+    }
+
+    if (group.thinking_effort) {
+      hostEnv['HAPPYCLAW_THINKING_EFFORT'] = group.thinking_effort;
     }
 
     // Write .credentials.json for OAuth credentials
@@ -1079,16 +1186,6 @@ export async function runHostAgent(
     hostEnv['HAPPYCLAW_PROJECT_SKILLS_DIR'] = path.join(process.cwd(), 'container', 'skills');
     const homeClaudeDir = path.join(DATA_DIR, 'sessions', ownerHomeFolder || group.folder, '.claude');
     hostEnv['HAPPYCLAW_CLAUDE_CREDENTIALS_DIR'] = homeClaudeDir;
-
-
-    if (group.thinking_effort) {
-      hostEnv['HAPPYCLAW_THINKING_EFFORT'] = group.thinking_effort;
-    }
-
-    hostEnv['HAPPYCLAW_CLAUDE_AVAILABLE'] = '1';
-    if (process.env.OPENAI_API_KEY) {
-      hostEnv['HAPPYCLAW_CODEX_AVAILABLE'] = '1';
-    }
 
     // Agent-browser isolation: each workspace gets its own browser session + profile
     hostEnv['AGENT_BROWSER_SESSION'] = group.folder;
