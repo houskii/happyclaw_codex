@@ -56,6 +56,8 @@ export interface RegisteredGroup {
   llm_provider?: 'claude' | 'openai'; // LLM 提供商（默认 'claude'）
   model?: string; // 模型标识符覆盖（如 'opus', 'sonnet', 'haiku'），空=使用全局配置
   thinking_effort?: 'low' | 'medium' | 'high'; // Thinking effort 级别（默认 null=provider 默认）
+  context_compression?: string; // 上下文压缩模式（默认 'off'）
+  knowledge_extraction?: boolean; // 是否启用知识提取（默认 false）
 }
 
 export interface GroupMember {

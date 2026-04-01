@@ -113,6 +113,7 @@ import {
   getUserQQConfig,
   getUserWeChatConfig,
   getUserDingTalkConfig,
+  getUserIMPreferences,
   getSystemSettings,
   saveUserFeishuConfig,
   saveUserTelegramConfig,
@@ -137,6 +138,7 @@ import {
   getUserConcurrentContainerLimit,
   reconcileMonthlyUsage,
 } from './billing.js';
+import { getDefaultLlmBinding } from './llm-defaults.js';
 import {
   AgentStatus,
   MessageCursor,
@@ -1326,6 +1328,7 @@ async function handleNewCommand(
     added_at: now,
     executionMode: (await isDockerAvailable()) ? 'container' : 'host',
     created_by: userId,
+    ...getDefaultLlmBinding(),
   };
 
   // Register the workspace
@@ -6148,6 +6151,14 @@ function buildOnNewChat(
   homeFolder: string,
 ): (chatJid: string, chatName: string) => void {
   return (chatJid, chatName) => {
+    const rawChatId = extractChatId(chatJid);
+    const isGroupChat =
+      chatJid.startsWith('dingtalk:group:') ||
+      chatJid.startsWith('qq:group:') ||
+      (chatJid.startsWith('telegram:') && rawChatId.startsWith('-')) ||
+      (chatJid.startsWith('feishu:') && rawChatId.startsWith('oc_')) ||
+      (chatJid.startsWith('wechat:') && rawChatId.endsWith('@chatroom'));
+
     const existing = registeredGroups[chatJid];
     if (existing) {
       // Already owned by this user — nothing to do
@@ -6226,16 +6237,75 @@ function buildOnNewChat(
       }
       return;
     }
-    registerGroup(chatJid, {
-      name: chatName,
-      folder: homeFolder,
-      added_at: new Date().toISOString(),
-      created_by: userId,
-    });
-    logger.info(
-      { chatJid, chatName, userId, homeFolder },
-      'Auto-registered IM chat',
-    );
+    // Auto-create independent workspace for group chats if preference is on
+    const prefs = getUserIMPreferences(userId);
+    const shouldAutoCreate =
+      isGroupChat && prefs.autoCreateWorkspaceForGroups === true;
+
+    if (shouldAutoCreate) {
+      // 1. Create a new workspace
+      const newJid = `web:${crypto.randomUUID()}`;
+      const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const now = new Date().toISOString();
+      const execMode = prefs.autoCreateExecutionMode || 'host';
+
+      const newGroup: RegisteredGroup = {
+        name: chatName,
+        folder,
+        added_at: now,
+        executionMode: execMode,
+        created_by: userId,
+        ...getDefaultLlmBinding(),
+      };
+      registerGroup(newJid, newGroup);
+      ensureChatExists(newJid);
+      updateChatName(newJid, chatName);
+      addGroupMember(folder, userId, 'owner', userId);
+
+      // 2. Register the IM group and bind to the new workspace
+      registerGroup(chatJid, {
+        name: chatName,
+        folder: homeFolder,
+        added_at: now,
+        created_by: userId,
+        target_main_jid: newJid,
+        reply_policy: 'source_only',
+      });
+
+      logger.info(
+        { chatJid, chatName, userId, newFolder: folder, newJid },
+        'Auto-created workspace for IM group chat',
+      );
+
+      // 如果群名未能获取（通用名），在工作区写一条系统提示
+      if (chatName === '飞书群聊') {
+        storeMessageDirect(
+          `system-${Date.now()}`,
+          newJid,
+          'system',
+          '系统',
+          '⚠️ 无法获取飞书群名称，工作区暂时命名为"飞书群聊"。请在飞书开放平台为应用开通 `im:chat:readonly` 权限后，发送新消息即可自动更新名称。',
+          now,
+          true,
+        );
+        broadcastToWebClients(newJid,
+          '⚠️ 无法获取飞书群名称，工作区暂时命名为"飞书群聊"。请在飞书开放平台为应用开通 `im:chat:readonly` 权限后，发送新消息即可自动更新名称。',
+        );
+      }
+    } else {
+      // Default: route to home
+      registerGroup(chatJid, {
+        name: chatName,
+        folder: homeFolder,
+        added_at: new Date().toISOString(),
+        created_by: userId,
+        target_main_jid: `web:${homeFolder}`,
+      });
+      logger.info(
+        { chatJid, chatName, userId, homeFolder },
+        'Auto-registered IM chat',
+      );
+    }
   };
 }
 

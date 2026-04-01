@@ -49,6 +49,10 @@ import {
   writeRunLog,
   type CloseHandlerContext,
 } from './agent-output-parser.js';
+import {
+  getProviderDefaultModel,
+  resolveProviderId,
+} from './provider-adapters/registry.js';
 
 /**
  * Required env flags for settings.json — 每次容器/进程启动时强制写入，不可被用户覆盖。
@@ -360,7 +364,7 @@ function buildVolumeMounts(
   }
 
   // LLM provider selection (default: claude)
-  const llmProvider = group.llm_provider === 'openai' ? 'codex' : 'claude';
+  const llmProvider = resolveProviderId(group.llm_provider);
   envLines.push(`HAPPYCLAW_LLM_PROVIDER=${llmProvider}`);
 
   // Codex provider config: read from persistent config, fallback to env var
@@ -378,6 +382,11 @@ function buildVolumeMounts(
       envLines.push(`HAPPYCLAW_CODEX_MODEL=${group.model}`);
     } else if (codexProfile?.defaultModel) {
       envLines.push(`HAPPYCLAW_CODEX_MODEL=${codexProfile.defaultModel}`);
+    } else {
+      const defaultCodexModel = getProviderDefaultModel('codex');
+      if (defaultCodexModel) {
+        envLines.push(`HAPPYCLAW_CODEX_MODEL=${defaultCodexModel}`);
+      }
     }
     // Persist Codex session data (rollout JSONL + SQLite) so threads survive restarts
     const codexHomeDir = path.join(DATA_DIR, 'sessions', group.folder, 'codex-home');
@@ -1085,8 +1094,7 @@ export async function runHostAgent(
       hostEnv['HAPPYCLAW_MODEL'] = group.model;
     }
 
-    const hostLlmProvider =
-      group.llm_provider === 'openai' ? 'codex' : 'claude';
+    const hostLlmProvider = resolveProviderId(group.llm_provider);
     hostEnv['HAPPYCLAW_LLM_PROVIDER'] = hostLlmProvider;
 
     const hostCodexConfig = getCodexProviderConfig();
@@ -1108,6 +1116,11 @@ export async function runHostAgent(
         hostEnv['HAPPYCLAW_CODEX_MODEL'] = group.model;
       } else if (hostCodexProfile?.defaultModel) {
         hostEnv['HAPPYCLAW_CODEX_MODEL'] = hostCodexProfile.defaultModel;
+      } else {
+        const defaultCodexModel = getProviderDefaultModel('codex');
+        if (defaultCodexModel) {
+          hostEnv['HAPPYCLAW_CODEX_MODEL'] = defaultCodexModel;
+        }
       }
     }
 

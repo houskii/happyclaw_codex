@@ -1,14 +1,19 @@
 import { Hono } from 'hono';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
+  getUserHomeGroup,
   getUsageDailyStats,
   getUsageDailySummary,
   getUsageModels,
   getUsageUsers,
 } from '../db.js';
+import { DATA_DIR } from '../config.js';
+import { logger } from '../logger.js';
 import type { AuthUser } from '../types.js';
-
+import { getProviderUsageApiUrl } from '../provider-adapters/registry.js';
 const usage = new Hono<{ Variables: Variables }>();
 
 usage.use('*', authMiddleware);
@@ -83,4 +88,170 @@ usage.get('/users', (c) => {
   return c.json({ users });
 });
 
+// --- Anthropic subscription usage (OAuth API) ---
+
+interface SubscriptionWindow {
+  utilization: number;
+  resets_at: string;
+}
+
+interface SubscriptionData {
+  five_hour?: SubscriptionWindow;
+  seven_day?: SubscriptionWindow;
+  seven_day_sonnet?: SubscriptionWindow;
+  extra_usage?: { is_enabled: boolean };
+}
+
+interface CachedSubscription {
+  data: SubscriptionData;
+  fetchedAt: number;
+}
+
+const subscriptionCache = new Map<string, CachedSubscription>();
+const CACHE_TTL_MS = 300_000; // 5min — Anthropic rate-limits aggressively
+
+/**
+ * Read OAuth access token from a user's session credentials.
+ */
+function readSessionOAuthToken(folder: string): string | null {
+  if (folder.includes('..') || folder.includes('/')) return null;
+  try {
+    const credFile = path.join(
+      DATA_DIR,
+      'sessions',
+      folder,
+      '.claude',
+      '.credentials.json',
+    );
+    if (!fs.existsSync(credFile)) return null;
+    const content = JSON.parse(fs.readFileSync(credFile, 'utf-8'));
+    return content?.claudeAiOauth?.accessToken || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /api/usage/subscription
+ * Proxies the Anthropic OAuth usage API with per-user caching (60s).
+ */
+usage.get('/subscription', async (c) => {
+  const user = c.get('user') as AuthUser;
+
+  // Find user's home folder
+  const homeGroup = getUserHomeGroup(user.id);
+  if (!homeGroup) {
+    return c.json({ error: 'no_home_group', message: '未找到主容器' }, 404);
+  }
+  const folder = homeGroup.folder;
+
+  // Check cache
+  const cached = subscriptionCache.get(user.id);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return c.json({
+      subscription: cached.data,
+      cached: true,
+      cached_at: new Date(cached.fetchedAt).toISOString(),
+    });
+  }
+
+  // Read OAuth token
+  const token = readSessionOAuthToken(folder);
+  if (!token) {
+    return c.json({
+      error: 'no_credentials',
+      message: 'OAuth 凭据不可用，请先登录 Claude Code',
+      subscription: null,
+      cached: false,
+      cached_at: new Date().toISOString(),
+    });
+  }
+
+  // Call Anthropic usage API
+  try {
+    const usageApiUrl = getProviderUsageApiUrl('claude');
+    const resp = await fetch(usageApiUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (resp.status === 401) {
+      // Try to parse the error body for more specific messages
+      let errorDetail = '';
+      try {
+        const body = await resp.json() as { error?: { message?: string } };
+        errorDetail = body?.error?.message || '';
+      } catch { /* ignore parse errors */ }
+
+      const isOAuthUnsupported = errorDetail.toLowerCase().includes('oauth authentication is currently not supported');
+      return c.json({
+        error: isOAuthUnsupported ? 'oauth_unsupported' : 'token_expired',
+        message: isOAuthUnsupported
+          ? 'Anthropic 已暂停 OAuth 对此 API 的访问，订阅配额暂不可用'
+          : 'OAuth Token 已过期，请重新登录 Claude Code',
+        subscription: null,
+        cached: false,
+        cached_at: new Date().toISOString(),
+      });
+    }
+
+    if (resp.status === 429) {
+      // Rate limited — return stale cache if available
+      if (cached) {
+        return c.json({
+          subscription: cached.data,
+          cached: true,
+          cached_at: new Date(cached.fetchedAt).toISOString(),
+          rate_limited: true,
+        });
+      }
+      return c.json({
+        error: 'rate_limited',
+        message: 'API 限流，请稍后重试',
+        subscription: null,
+        cached: false,
+        cached_at: new Date().toISOString(),
+      });
+    }
+
+    if (!resp.ok) {
+      logger.warn(
+        { status: resp.status },
+        'Anthropic usage API returned non-OK status',
+      );
+      return c.json({
+        error: 'api_error',
+        message: `Anthropic API 返回 ${resp.status}`,
+        subscription: null,
+        cached: false,
+        cached_at: new Date().toISOString(),
+      });
+    }
+
+    const data = (await resp.json()) as SubscriptionData;
+
+    // Cache result
+    subscriptionCache.set(user.id, { data, fetchedAt: Date.now() });
+
+    return c.json({
+      subscription: data,
+      cached: false,
+      cached_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to fetch Anthropic subscription usage');
+    return c.json({
+      error: 'fetch_error',
+      message: '无法连接 Anthropic API',
+      subscription: null,
+      cached: false,
+      cached_at: new Date().toISOString(),
+    });
+  }
+});
 export { usage };

@@ -87,6 +87,11 @@ export interface SessionInfo {
   is_current: boolean;
 }
 
+export interface SettingsNotification {
+  setNotice: (value: string | null) => void;
+  setError: (value: string | null) => void;
+}
+
 export interface SystemSettings {
   containerTimeout: number;
   idleTimeout: number;
@@ -104,6 +109,20 @@ export interface SystemSettings {
   billingMinStartBalanceUsd: number;
   billingCurrency: string;
   billingCurrencyRate: number;
+  memoryQueryTimeout: number;
+  memoryGlobalSleepTimeout: number;
+  memorySendTimeout: number;
+  turnBatchWindowMs: number;
+  turnMaxBatchMs: number;
+  traceRetentionDays: number;
+  webPublicUrl: string;
+  defaultLlmProvider: 'claude' | 'openai';
+  defaultClaudeModel: string;
+  defaultCodexModel: string;
+  claudeUsageApiUrl: string;
+  codexUsageApiUrl: string;
+  claudeSdkBaseUrl: string;
+  codexSdkBaseUrl: string;
 }
 
 export type SettingsTab = 'claude' | 'codex' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor';

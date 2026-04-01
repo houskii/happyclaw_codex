@@ -74,6 +74,7 @@ import net from 'node:net';
 import { z } from 'zod';
 import { broadcastNewMessage, invalidateAllowedUserCache } from '../web.js';
 import { getStreamingSession } from '../feishu-streaming-card.js';
+import { getDefaultLlmBinding } from '../llm-defaults.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -154,6 +155,11 @@ interface GroupPayloadItem {
   member_count?: number;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  llm_provider?: string;
+  model?: string;
+  thinking_effort?: string | null;
+  context_compression?: string;
+  knowledge_extraction?: boolean;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -262,6 +268,11 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       member_count: isShared ? memberInfo?.count : undefined,
       pinned_at: pins[jid] || undefined,
       activation_mode: group.activation_mode ?? 'auto',
+      llm_provider: group.llm_provider ?? getDefaultLlmBinding().llm_provider,
+      model: group.model ?? undefined,
+      thinking_effort: group.thinking_effort ?? null,
+      context_compression: group.context_compression ?? 'off',
+      knowledge_extraction: group.knowledge_extraction ?? false,
     };
   }
 
@@ -579,6 +590,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
     created_by: authUser.id,
+    ...getDefaultLlmBinding(),
   };
 
   setRegisteredGroup(jid, group);

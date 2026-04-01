@@ -3371,6 +3371,26 @@ export interface SystemSettings {
   billingMinStartBalanceUsd: number;
   billingCurrency: string;
   billingCurrencyRate: number;
+  memoryQueryTimeout: number;
+  memoryGlobalSleepTimeout: number;
+  memorySendTimeout: number;
+  turnBatchWindowMs: number;
+  turnMaxBatchMs: number;
+  traceRetentionDays: number;
+  // Feishu
+  feishuApiDomain: string;
+  feishuDocDomain: string;
+  // Web
+  webPublicUrl: string;
+  // Global default models (workspace-level overrides these)
+  defaultLlmProvider: 'claude' | 'openai';
+  defaultClaudeModel: string;
+  defaultCodexModel: string;
+  // Provider-level extensible endpoints (usage + SDK)
+  claudeUsageApiUrl: string;
+  codexUsageApiUrl: string;
+  claudeSdkBaseUrl: string;
+  codexSdkBaseUrl: string;
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -3390,6 +3410,22 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   billingMinStartBalanceUsd: 0.01,
   billingCurrency: 'USD',
   billingCurrencyRate: 1,
+  memoryQueryTimeout: 60000,
+  memoryGlobalSleepTimeout: 300000,
+  memorySendTimeout: 120000,
+  turnBatchWindowMs: 5000,
+  turnMaxBatchMs: 30000,
+  traceRetentionDays: 7,
+  feishuApiDomain: 'open.feishu.cn',
+  feishuDocDomain: 'bytedance.larkoffice.com',
+  webPublicUrl: '',
+  defaultLlmProvider: 'claude',
+  defaultClaudeModel: '',
+  defaultCodexModel: '',
+  claudeUsageApiUrl: 'https://api.anthropic.com/api/oauth/usage',
+  codexUsageApiUrl: '',
+  claudeSdkBaseUrl: '',
+  codexSdkBaseUrl: '',
 };
 
 function parseIntEnv(envVar: string | undefined, fallback: number): number {
@@ -3481,6 +3517,69 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.billingCurrencyRate === 'number' && raw.billingCurrencyRate > 0
         ? raw.billingCurrencyRate
         : DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
+    memoryQueryTimeout:
+      typeof raw.memoryQueryTimeout === 'number' && raw.memoryQueryTimeout > 0
+        ? raw.memoryQueryTimeout
+        : DEFAULT_SYSTEM_SETTINGS.memoryQueryTimeout,
+    memoryGlobalSleepTimeout:
+      typeof raw.memoryGlobalSleepTimeout === 'number' &&
+      raw.memoryGlobalSleepTimeout > 0
+        ? raw.memoryGlobalSleepTimeout
+        : DEFAULT_SYSTEM_SETTINGS.memoryGlobalSleepTimeout,
+    memorySendTimeout:
+      typeof raw.memorySendTimeout === 'number' && raw.memorySendTimeout > 0
+        ? raw.memorySendTimeout
+        : DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
+    turnBatchWindowMs:
+      typeof raw.turnBatchWindowMs === 'number' && raw.turnBatchWindowMs > 0
+        ? raw.turnBatchWindowMs
+        : DEFAULT_SYSTEM_SETTINGS.turnBatchWindowMs,
+    turnMaxBatchMs:
+      typeof raw.turnMaxBatchMs === 'number' && raw.turnMaxBatchMs > 0
+        ? raw.turnMaxBatchMs
+        : DEFAULT_SYSTEM_SETTINGS.turnMaxBatchMs,
+    traceRetentionDays:
+      typeof raw.traceRetentionDays === 'number' && raw.traceRetentionDays > 0
+        ? raw.traceRetentionDays
+        : DEFAULT_SYSTEM_SETTINGS.traceRetentionDays,
+    feishuApiDomain:
+      typeof raw.feishuApiDomain === 'string' && raw.feishuApiDomain
+        ? raw.feishuApiDomain
+        : DEFAULT_SYSTEM_SETTINGS.feishuApiDomain,
+    feishuDocDomain:
+      typeof raw.feishuDocDomain === 'string' && raw.feishuDocDomain
+        ? raw.feishuDocDomain
+        : DEFAULT_SYSTEM_SETTINGS.feishuDocDomain,
+    webPublicUrl:
+      typeof raw.webPublicUrl === 'string'
+        ? raw.webPublicUrl
+        : DEFAULT_SYSTEM_SETTINGS.webPublicUrl,
+    defaultLlmProvider:
+      raw.defaultLlmProvider === 'openai' ? 'openai' : 'claude',
+    defaultClaudeModel:
+      typeof raw.defaultClaudeModel === 'string'
+        ? raw.defaultClaudeModel.trim()
+        : DEFAULT_SYSTEM_SETTINGS.defaultClaudeModel,
+    defaultCodexModel:
+      typeof raw.defaultCodexModel === 'string'
+        ? raw.defaultCodexModel.trim()
+        : DEFAULT_SYSTEM_SETTINGS.defaultCodexModel,
+    claudeUsageApiUrl:
+      typeof raw.claudeUsageApiUrl === 'string'
+        ? raw.claudeUsageApiUrl.trim()
+        : DEFAULT_SYSTEM_SETTINGS.claudeUsageApiUrl,
+    codexUsageApiUrl:
+      typeof raw.codexUsageApiUrl === 'string'
+        ? raw.codexUsageApiUrl.trim()
+        : DEFAULT_SYSTEM_SETTINGS.codexUsageApiUrl,
+    claudeSdkBaseUrl:
+      typeof raw.claudeSdkBaseUrl === 'string'
+        ? raw.claudeSdkBaseUrl.trim()
+        : DEFAULT_SYSTEM_SETTINGS.claudeSdkBaseUrl,
+    codexSdkBaseUrl:
+      typeof raw.codexSdkBaseUrl === 'string'
+        ? raw.codexSdkBaseUrl.trim()
+        : DEFAULT_SYSTEM_SETTINGS.codexSdkBaseUrl,
   };
 }
 
@@ -3543,6 +3642,49 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.BILLING_CURRENCY_RATE,
       DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
     ),
+    memoryQueryTimeout: parseIntEnv(
+      process.env.MEMORY_QUERY_TIMEOUT,
+      DEFAULT_SYSTEM_SETTINGS.memoryQueryTimeout,
+    ),
+    memoryGlobalSleepTimeout: parseIntEnv(
+      process.env.MEMORY_GLOBAL_SLEEP_TIMEOUT,
+      DEFAULT_SYSTEM_SETTINGS.memoryGlobalSleepTimeout,
+    ),
+    memorySendTimeout: parseIntEnv(
+      process.env.MEMORY_SEND_TIMEOUT,
+      DEFAULT_SYSTEM_SETTINGS.memorySendTimeout,
+    ),
+    turnBatchWindowMs: parseIntEnv(
+      process.env.TURN_BATCH_WINDOW_MS,
+      DEFAULT_SYSTEM_SETTINGS.turnBatchWindowMs,
+    ),
+    turnMaxBatchMs: parseIntEnv(
+      process.env.TURN_MAX_BATCH_MS,
+      DEFAULT_SYSTEM_SETTINGS.turnMaxBatchMs,
+    ),
+    traceRetentionDays: parseIntEnv(
+      process.env.TRACE_RETENTION_DAYS,
+      DEFAULT_SYSTEM_SETTINGS.traceRetentionDays,
+    ),
+    feishuApiDomain:
+      process.env.FEISHU_API_DOMAIN || DEFAULT_SYSTEM_SETTINGS.feishuApiDomain,
+    feishuDocDomain:
+      process.env.FEISHU_DOC_DOMAIN || DEFAULT_SYSTEM_SETTINGS.feishuDocDomain,
+    webPublicUrl:
+      process.env.WEB_PUBLIC_URL || DEFAULT_SYSTEM_SETTINGS.webPublicUrl,
+    defaultLlmProvider:
+      process.env.DEFAULT_LLM_PROVIDER === 'openai' ? 'openai' : 'claude',
+    defaultClaudeModel: process.env.DEFAULT_CLAUDE_MODEL || DEFAULT_SYSTEM_SETTINGS.defaultClaudeModel,
+    defaultCodexModel:
+      process.env.DEFAULT_CODEX_MODEL || DEFAULT_SYSTEM_SETTINGS.defaultCodexModel,
+    claudeUsageApiUrl:
+      process.env.CLAUDE_USAGE_API_URL || DEFAULT_SYSTEM_SETTINGS.claudeUsageApiUrl,
+    codexUsageApiUrl:
+      process.env.CODEX_USAGE_API_URL || DEFAULT_SYSTEM_SETTINGS.codexUsageApiUrl,
+    claudeSdkBaseUrl:
+      process.env.CLAUDE_SDK_BASE_URL || DEFAULT_SYSTEM_SETTINGS.claudeSdkBaseUrl,
+    codexSdkBaseUrl:
+      process.env.CODEX_SDK_BASE_URL || DEFAULT_SYSTEM_SETTINGS.codexSdkBaseUrl,
   };
 }
 
@@ -3625,6 +3767,48 @@ export function saveSystemSettings(
       DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd;
   if (merged.billingMinStartBalanceUsd > 1000000)
     merged.billingMinStartBalanceUsd = 1000000;
+  if (merged.memoryQueryTimeout < 10000) merged.memoryQueryTimeout = 10000; // min 10s
+  if (merged.memoryQueryTimeout > 600000) merged.memoryQueryTimeout = 600000; // max 10 min
+  if (merged.memoryGlobalSleepTimeout < 60000)
+    merged.memoryGlobalSleepTimeout = 60000; // min 1 min
+  if (merged.memoryGlobalSleepTimeout > 3600000)
+    merged.memoryGlobalSleepTimeout = 3600000; // max 1 hour
+  if (merged.memorySendTimeout < 30000) merged.memorySendTimeout = 30000; // min 30s
+  if (merged.memorySendTimeout > 3600000) merged.memorySendTimeout = 3600000; // max 1 hour
+  if (merged.turnBatchWindowMs < 1000) merged.turnBatchWindowMs = 1000; // min 1s
+  if (merged.turnBatchWindowMs > 60000) merged.turnBatchWindowMs = 60000; // max 60s
+  if (merged.turnMaxBatchMs < 5000) merged.turnMaxBatchMs = 5000; // min 5s
+  if (merged.turnMaxBatchMs > 300000) merged.turnMaxBatchMs = 300000; // max 5 min
+  if (merged.traceRetentionDays < 1) merged.traceRetentionDays = 1; // min 1 day
+  if (merged.traceRetentionDays > 90) merged.traceRetentionDays = 90; // max 90 days
+  // webPublicUrl: strip trailing slash
+  if (typeof merged.webPublicUrl === 'string') {
+    merged.webPublicUrl = merged.webPublicUrl.replace(/\/+$/, '');
+  }
+  merged.defaultLlmProvider =
+    merged.defaultLlmProvider === 'openai' ? 'openai' : 'claude';
+  merged.defaultClaudeModel = (merged.defaultClaudeModel || '').trim();
+  merged.defaultCodexModel = (merged.defaultCodexModel || '').trim();
+  // Feishu domains: strip protocol prefix and trailing slash
+  for (const key of ['feishuApiDomain', 'feishuDocDomain'] as const) {
+    if (typeof merged[key] === 'string') {
+      merged[key] = merged[key]
+        .replace(/^https?:\/\//, '')
+        .replace(/\/+$/, '')
+        .trim();
+    }
+    if (!merged[key]) {
+      merged[key] = DEFAULT_SYSTEM_SETTINGS[key];
+    }
+  }
+  for (const key of [
+    'claudeUsageApiUrl',
+    'codexUsageApiUrl',
+    'claudeSdkBaseUrl',
+    'codexSdkBaseUrl',
+  ] as const) {
+    merged[key] = (merged[key] || '').trim();
+  }
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
   const tmp = `${SYSTEM_SETTINGS_FILE}.tmp`;
