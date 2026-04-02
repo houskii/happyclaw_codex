@@ -226,7 +226,7 @@ usage.get('/subscription', async (c) => {
       );
       return c.json({
         error: 'api_error',
-        message: `Anthropic API 返回 ${resp.status}`,
+        message: `Anthropic 服务返回 ${resp.status}`,
         subscription: null,
         cached: false,
         cached_at: new Date().toISOString(),
@@ -247,7 +247,7 @@ usage.get('/subscription', async (c) => {
     logger.error({ err }, 'Failed to fetch Anthropic subscription usage');
     return c.json({
       error: 'fetch_error',
-      message: '无法连接 Anthropic API',
+      message: '无法连接 Anthropic 服务',
       subscription: null,
       cached: false,
       cached_at: new Date().toISOString(),
