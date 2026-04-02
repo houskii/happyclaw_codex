@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import type { HostIntegrationConflictItem } from '../types/host-integrations';
 
 export interface Skill {
   id: string;
@@ -23,10 +24,16 @@ export interface SkillDetail extends Skill {
 
 interface SkillsState {
   skills: Skill[];
+  conflicts: HostIntegrationConflictItem[];
   loading: boolean;
   error: string | null;
 
   loadSkills: () => Promise<void>;
+  updateConflict: (
+    id: string,
+    mode: 'auto' | 'pinned',
+    pinnedSourceId?: string,
+  ) => Promise<void>;
   toggleSkill: (id: string, enabled: boolean) => Promise<void>;
   deleteSkill: (id: string) => Promise<void>;
   getSkillDetail: (id: string) => Promise<SkillDetail>;
@@ -34,16 +41,39 @@ interface SkillsState {
 
 export const useSkillsStore = create<SkillsState>((set, get) => ({
   skills: [],
+  conflicts: [],
   loading: false,
   error: null,
 
   loadSkills: async () => {
     set({ loading: true });
     try {
-      const data = await api.get<{ skills: Skill[] }>('/api/skills');
-      set({ skills: data.skills, loading: false, error: null });
+      const data = await api.get<{
+        skills: Skill[];
+        conflicts: HostIntegrationConflictItem[];
+      }>('/api/skills');
+      set({
+        skills: data.skills,
+        conflicts: data.conflicts,
+        loading: false,
+        error: null,
+      });
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  updateConflict: async (id, mode, pinnedSourceId) => {
+    try {
+      await api.patch(`/api/skills/conflicts/${encodeURIComponent(id)}`, {
+        mode,
+        ...(mode === 'pinned' && pinnedSourceId ? { pinnedSourceId } : {}),
+      });
+      set({ error: null });
+      await get().loadSkills();
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
     }
   },
 

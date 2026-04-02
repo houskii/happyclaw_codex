@@ -247,6 +247,27 @@ const HostIntegrationSourceSchema = z.object({
   mcpEnabled: z.boolean(),
 });
 
+const HostIntegrationConflictOverrideSchema = z
+  .object({
+    kind: z.enum(['skill', 'mcp']),
+    itemId: z.string().min(1).max(256),
+    mode: z.enum(['auto', 'pinned']),
+    pinnedSourceId: z.string().min(1).max(128).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.mode === 'pinned' && !data.pinnedSourceId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['pinnedSourceId'],
+        message: 'pinned 模式必须指定来源',
+      });
+    }
+  });
+
+const HostIntegrationConflictSettingsSchema = z.object({
+  overrides: z.array(HostIntegrationConflictOverrideSchema).optional(),
+});
+
 export const SystemSettingsSchema = z.object({
   containerTimeout: z.number().int().min(60000).max(86400000).optional(),
   idleTimeout: z.number().int().min(60000).max(86400000).optional(),
@@ -292,6 +313,8 @@ export const SystemSettingsSchema = z.object({
   anthropicSdkBaseUrl: z.string().max(2000).optional(),
   openaiSdkBaseUrl: z.string().max(2000).optional(),
   hostIntegrationSources: z.array(HostIntegrationSourceSchema).optional(),
+  hostIntegrationConflictSettings:
+    HostIntegrationConflictSettingsSchema.optional(),
 });
 
 export const AppearanceConfigSchema = z.object({

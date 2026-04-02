@@ -5,6 +5,7 @@ import os from 'os';
 import { DATA_DIR } from './config.js';
 import {
   getSystemSettings,
+  type HostIntegrationConflictOverride,
   type HostIntegrationSource,
 } from './runtime-config.js';
 import { validateSkillId } from './skill-utils.js';
@@ -81,6 +82,37 @@ export interface HostIntegrationSyncResult {
     owners: Record<string, string>;
     lastSyncAt: string;
   };
+}
+
+interface BaseCollectedCandidate {
+  sourceId: string;
+  sourceLabel: string;
+  sourcePath: string;
+}
+
+interface CollectedSkillCandidate extends BaseCollectedCandidate {
+  skillPath: string;
+}
+
+interface CollectedMcpCandidate extends BaseCollectedCandidate {
+  entry: Record<string, unknown>;
+}
+
+export interface HostIntegrationConflictCandidate {
+  sourceId: string;
+  sourceLabel: string;
+  sourcePath: string;
+}
+
+export interface HostIntegrationConflictItem {
+  itemId: string;
+  mode: 'auto' | 'pinned';
+  pinnedSourceId: string | null;
+  effectiveSourceId: string | null;
+  effectiveSourceLabel: string | null;
+  effectiveSourcePath: string | null;
+  warning: string | null;
+  candidates: HostIntegrationConflictCandidate[];
 }
 
 function expandHomePath(input: string): string {
@@ -409,6 +441,125 @@ function scanMcpFromSource(
   return { servers };
 }
 
+function getConflictOverrideMap(
+  kind: HostIntegrationConflictOverride['kind'],
+): Map<string, HostIntegrationConflictOverride> {
+  const overrides =
+    getSystemSettings().hostIntegrationConflictSettings?.overrides ?? [];
+  return new Map(
+    overrides
+      .filter((item) => item.kind === kind)
+      .map((item) => [item.itemId, item]),
+  );
+}
+
+function buildSkillCandidates(
+  sources: HostIntegrationSource[],
+): Record<string, CollectedSkillCandidate[]> {
+  const byId: Record<string, CollectedSkillCandidate[]> = {};
+
+  for (const source of sources) {
+    if (!source.enabled || !source.skillsEnabled) continue;
+    const { skills } = scanSkillsFromSource(source);
+    for (const [skillId, skillPath] of Object.entries(skills)) {
+      const bucket = byId[skillId] ?? [];
+      bucket.push({
+        sourceId: source.id,
+        sourceLabel: source.label,
+        sourcePath: source.path,
+        skillPath,
+      });
+      byId[skillId] = bucket;
+    }
+  }
+
+  return byId;
+}
+
+function buildMcpCandidates(
+  sources: HostIntegrationSource[],
+): Record<string, CollectedMcpCandidate[]> {
+  const byId: Record<string, CollectedMcpCandidate[]> = {};
+
+  for (const source of sources) {
+    if (!source.enabled || !source.mcpEnabled) continue;
+    const { servers } = scanMcpFromSource(source);
+    for (const [serverId, entry] of Object.entries(servers)) {
+      const bucket = byId[serverId] ?? [];
+      bucket.push({
+        sourceId: source.id,
+        sourceLabel: source.label,
+        sourcePath: source.path,
+        entry,
+      });
+      byId[serverId] = bucket;
+    }
+  }
+
+  return byId;
+}
+
+function resolveCandidateSelection<T extends BaseCollectedCandidate>(
+  kind: HostIntegrationConflictOverride['kind'],
+  itemId: string,
+  candidates: T[],
+): {
+  selected: T | null;
+  mode: 'auto' | 'pinned';
+  pinnedSourceId: string | null;
+  warning: string | null;
+} {
+  const override = getConflictOverrideMap(kind).get(itemId);
+  if (override?.mode === 'pinned') {
+    const pinned = candidates.find(
+      (candidate) => candidate.sourceId === override.pinnedSourceId,
+    );
+    if (pinned) {
+      return {
+        selected: pinned,
+        mode: 'pinned',
+        pinnedSourceId: override.pinnedSourceId ?? null,
+        warning: null,
+      };
+    }
+    return {
+      selected: candidates.at(-1) ?? null,
+      mode: 'auto',
+      pinnedSourceId: override.pinnedSourceId ?? null,
+      warning: '固定来源当前不可用，已临时回退自动模式',
+    };
+  }
+
+  return {
+    selected: candidates.at(-1) ?? null,
+    mode: 'auto',
+    pinnedSourceId: null,
+    warning: null,
+  };
+}
+
+function toConflictItem<T extends BaseCollectedCandidate>(
+  kind: HostIntegrationConflictOverride['kind'],
+  itemId: string,
+  candidates: T[],
+): HostIntegrationConflictItem {
+  const resolution = resolveCandidateSelection(kind, itemId, candidates);
+  return {
+    itemId,
+    mode: resolution.mode,
+    pinnedSourceId: resolution.pinnedSourceId,
+    effectiveSourceId: resolution.selected?.sourceId ?? null,
+    effectiveSourceLabel: resolution.selected?.sourceLabel ?? null,
+    effectiveSourcePath: resolution.selected?.sourcePath ?? null,
+    warning: resolution.warning,
+    candidates: candidates.map((candidate) => ({
+      sourceId: candidate.sourceId,
+      sourceLabel: candidate.sourceLabel,
+      sourcePath: candidate.sourcePath,
+    })),
+  };
+}
+
 export function getHostIntegrationStatuses(
   sources = getSystemSettings().hostIntegrationSources,
 ): HostIntegrationSourceStatus[] {
@@ -566,35 +717,46 @@ export function getMcpHostSyncSnapshot(userId: string): {
   };
 }
 
+export function getSkillsHostConflictOverview(): HostIntegrationConflictItem[] {
+  const sources = getSystemSettings().hostIntegrationSources;
+  return Object.entries(buildSkillCandidates(sources))
+    .filter(([, candidates]) => candidates.length > 1)
+    .map(([itemId, candidates]) => toConflictItem('skill', itemId, candidates))
+    .sort((a, b) => a.itemId.localeCompare(b.itemId));
+}
+
+export function getMcpHostConflictOverview(): HostIntegrationConflictItem[] {
+  const sources = getSystemSettings().hostIntegrationSources;
+  return Object.entries(buildMcpCandidates(sources))
+    .filter(([, candidates]) => candidates.length > 1)
+    .map(([itemId, candidates]) => toConflictItem('mcp', itemId, candidates))
+    .sort((a, b) => a.itemId.localeCompare(b.itemId));
+}
+
 export function syncHostIntegrationsForUser(userId: string): HostIntegrationSyncResult {
   const sources = getSystemSettings().hostIntegrationSources;
   const sourceStatuses = getHostIntegrationStatuses(sources);
-
   const desiredSkills: Record<string, SyncedSkillSpec> = {};
   const desiredMcp: Record<string, SyncedMcpSpec> = {};
+  const skillCandidates = buildSkillCandidates(sources);
+  const mcpCandidates = buildMcpCandidates(sources);
 
-  for (const source of sources) {
-    if (!source.enabled) continue;
+  for (const [skillId, candidates] of Object.entries(skillCandidates)) {
+    const selected = resolveCandidateSelection('skill', skillId, candidates).selected;
+    if (!selected) continue;
+    desiredSkills[skillId] = {
+      sourceId: selected.sourceId,
+      sourcePath: selected.skillPath,
+    };
+  }
 
-    if (source.skillsEnabled) {
-      const { skills } = scanSkillsFromSource(source);
-      for (const [skillId, sourcePath] of Object.entries(skills)) {
-        desiredSkills[skillId] = {
-          sourceId: source.id,
-          sourcePath,
-        };
-      }
-    }
-
-    if (source.mcpEnabled) {
-      const { servers } = scanMcpFromSource(source);
-      for (const [serverId, entry] of Object.entries(servers)) {
-        desiredMcp[serverId] = {
-          sourceId: source.id,
-          entry,
-        };
-      }
-    }
+  for (const [serverId, candidates] of Object.entries(mcpCandidates)) {
+    const selected = resolveCandidateSelection('mcp', serverId, candidates).selected;
+    if (!selected) continue;
+    desiredMcp[serverId] = {
+      sourceId: selected.sourceId,
+      entry: selected.entry,
+    };
   }
 
   const skillsManifest = readOwnershipManifest(

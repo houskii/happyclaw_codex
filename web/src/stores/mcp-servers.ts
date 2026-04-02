@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import type { HostIntegrationConflictItem } from '../types/host-integrations';
 
 export interface McpServer {
   id: string;
@@ -20,10 +21,16 @@ export interface McpServer {
 
 interface McpServersState {
   servers: McpServer[];
+  conflicts: HostIntegrationConflictItem[];
   loading: boolean;
   error: string | null;
 
   loadServers: () => Promise<void>;
+  updateConflict: (
+    id: string,
+    mode: 'auto' | 'pinned',
+    pinnedSourceId?: string,
+  ) => Promise<void>;
   addServer: (server: {
     id: string;
     command?: string;
@@ -41,16 +48,39 @@ interface McpServersState {
 
 export const useMcpServersStore = create<McpServersState>((set, get) => ({
   servers: [],
+  conflicts: [],
   loading: false,
   error: null,
 
   loadServers: async () => {
     set({ loading: true });
     try {
-      const data = await api.get<{ servers: McpServer[] }>('/api/mcp-servers');
-      set({ servers: data.servers, loading: false, error: null });
+      const data = await api.get<{
+        servers: McpServer[];
+        conflicts: HostIntegrationConflictItem[];
+      }>('/api/mcp-servers');
+      set({
+        servers: data.servers,
+        conflicts: data.conflicts,
+        loading: false,
+        error: null,
+      });
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  updateConflict: async (id, mode, pinnedSourceId) => {
+    try {
+      await api.patch(`/api/mcp-servers/conflicts/${encodeURIComponent(id)}`, {
+        mode,
+        ...(mode === 'pinned' && pinnedSourceId ? { pinnedSourceId } : {}),
+      });
+      set({ error: null });
+      await get().loadServers();
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
     }
   },
 

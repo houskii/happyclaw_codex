@@ -8,7 +8,8 @@ import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
 import { checkMcpServerLimit } from '../billing.js';
-import { syncHostIntegrationsForUser } from '../host-integrations.js';
+import { syncHostIntegrationsForUser, getMcpHostConflictOverview } from '../host-integrations.js';
+import { getSystemSettings, saveSystemSettings } from '../runtime-config.js';
 
 // --- Types ---
 
@@ -64,6 +65,30 @@ async function writeMcpServersFile(
   await fs.writeFile(getServersFilePath(userId), JSON.stringify(data, null, 2));
 }
 
+function updateMcpConflictOverride(
+  serverId: string,
+  mode: 'auto' | 'pinned',
+  pinnedSourceId?: string,
+) {
+  const settings = getSystemSettings();
+  const overrides =
+    settings.hostIntegrationConflictSettings?.overrides ?? [];
+  const nextOverrides = overrides.filter(
+    (item) => !(item.kind === 'mcp' && item.itemId === serverId),
+  );
+  nextOverrides.push({
+    kind: 'mcp',
+    itemId: serverId,
+    mode,
+    ...(mode === 'pinned' && pinnedSourceId ? { pinnedSourceId } : {}),
+  });
+  return saveSystemSettings({
+    hostIntegrationConflictSettings: {
+      overrides: nextOverrides,
+    },
+  });
+}
+
 // --- Routes ---
 
 const mcpServersRoutes = new Hono<{ Variables: Variables }>();
@@ -76,7 +101,38 @@ mcpServersRoutes.get('/', authMiddleware, async (c) => {
     id,
     ...entry,
   }));
-  return c.json({ servers });
+  const conflicts = getMcpHostConflictOverview();
+  return c.json({ servers, conflicts });
+});
+
+mcpServersRoutes.patch('/conflicts/:id', authMiddleware, async (c) => {
+  const authUser = c.get('user') as AuthUser;
+  if (authUser.role !== 'admin') {
+    return c.json({ error: 'Only admin can change host conflict settings' }, 403);
+  }
+
+  const id = c.req.param('id');
+  if (!validateServerId(id)) {
+    return c.json({ error: 'Invalid server ID' }, 400);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const mode =
+    body.mode === 'auto' ? 'auto' : body.mode === 'pinned' ? 'pinned' : null;
+  const pinnedSourceId =
+    typeof body.pinnedSourceId === 'string' && body.pinnedSourceId.trim()
+      ? body.pinnedSourceId.trim()
+      : undefined;
+
+  if (!mode) {
+    return c.json({ error: 'mode must be auto or pinned' }, 400);
+  }
+  if (mode === 'pinned' && !pinnedSourceId) {
+    return c.json({ error: 'pinned 模式必须指定来源' }, 400);
+  }
+
+  updateMcpConflictOverride(id, mode, pinnedSourceId);
+  return c.json({ success: true, conflicts: getMcpHostConflictOverview() });
 });
 
 // POST / — add a new MCP server

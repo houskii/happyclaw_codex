@@ -3414,6 +3414,7 @@ export interface SystemSettings {
   skillAutoSyncEnabled: boolean;
   skillAutoSyncIntervalMinutes: number;
   hostIntegrationSources: HostIntegrationSource[];
+  hostIntegrationConflictSettings: HostIntegrationConflictSettings;
   // Billing
   billingEnabled: boolean;
   billingMode: 'wallet_first';
@@ -3453,6 +3454,17 @@ export interface HostIntegrationSource {
   mcpEnabled: boolean;
 }
 
+export interface HostIntegrationConflictOverride {
+  kind: 'skill' | 'mcp';
+  itemId: string;
+  mode: 'auto' | 'pinned';
+  pinnedSourceId?: string;
+}
+
+export interface HostIntegrationConflictSettings {
+  overrides: HostIntegrationConflictOverride[];
+}
+
 export const DEFAULT_HOST_INTEGRATION_SOURCES: HostIntegrationSource[] = [
   {
     id: 'anthropic-default',
@@ -3475,6 +3487,11 @@ export const DEFAULT_HOST_INTEGRATION_SOURCES: HostIntegrationSource[] = [
     mcpEnabled: true,
   },
 ];
+
+export const DEFAULT_HOST_INTEGRATION_CONFLICT_SETTINGS: HostIntegrationConflictSettings =
+  {
+    overrides: [],
+  };
 
 function normalizeHostIntegrationSource(
   input: unknown,
@@ -3551,6 +3568,59 @@ function normalizeHostIntegrationSources(
   return [...providerDefaults, ...Array.from(customById.values())];
 }
 
+function normalizeHostIntegrationConflictOverride(
+  input: unknown,
+): HostIntegrationConflictOverride | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const raw = input as Record<string, unknown>;
+  const kind =
+    raw.kind === 'skill' ? 'skill' : raw.kind === 'mcp' ? 'mcp' : null;
+  const mode =
+    raw.mode === 'auto' ? 'auto' : raw.mode === 'pinned' ? 'pinned' : null;
+  const itemId =
+    typeof raw.itemId === 'string' && raw.itemId.trim()
+      ? raw.itemId.trim()
+      : null;
+  const pinnedSourceId =
+    typeof raw.pinnedSourceId === 'string' && raw.pinnedSourceId.trim()
+      ? raw.pinnedSourceId.trim()
+      : undefined;
+
+  if (!kind || !mode || !itemId) return null;
+  if (mode === 'pinned' && !pinnedSourceId) return null;
+
+  return {
+    kind,
+    itemId,
+    mode,
+    ...(pinnedSourceId ? { pinnedSourceId } : {}),
+  };
+}
+
+function normalizeHostIntegrationConflictSettings(
+  input: unknown,
+): HostIntegrationConflictSettings {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return DEFAULT_HOST_INTEGRATION_CONFLICT_SETTINGS;
+  }
+
+  const raw = input as Record<string, unknown>;
+  const normalized = Array.isArray(raw.overrides)
+    ? raw.overrides
+        .map((item) => normalizeHostIntegrationConflictOverride(item))
+        .filter((item): item is HostIntegrationConflictOverride => item !== null)
+    : [];
+
+  const unique = new Map<string, HostIntegrationConflictOverride>();
+  for (const item of normalized) {
+    unique.set(`${item.kind}:${item.itemId}`, item);
+  }
+
+  return {
+    overrides: Array.from(unique.values()),
+  };
+}
+
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   containerTimeout: 1800000,
   idleTimeout: 1500000,
@@ -3564,6 +3634,8 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   skillAutoSyncEnabled: false,
   skillAutoSyncIntervalMinutes: 10,
   hostIntegrationSources: DEFAULT_HOST_INTEGRATION_SOURCES,
+  hostIntegrationConflictSettings:
+    DEFAULT_HOST_INTEGRATION_CONFLICT_SETTINGS,
   billingEnabled: false,
   billingMode: 'wallet_first',
   billingMinStartBalanceUsd: 0.01,
@@ -3661,6 +3733,10 @@ function readSystemSettingsFromFile(): SystemSettings | null {
     hostIntegrationSources: normalizeHostIntegrationSources(
       raw.hostIntegrationSources,
     ),
+    hostIntegrationConflictSettings:
+      normalizeHostIntegrationConflictSettings(
+        raw.hostIntegrationConflictSettings,
+      ),
     billingEnabled:
       typeof raw.billingEnabled === 'boolean'
         ? raw.billingEnabled
@@ -3791,6 +3867,8 @@ function buildEnvFallbackSettings(): SystemSettings {
       DEFAULT_SYSTEM_SETTINGS.skillAutoSyncIntervalMinutes,
     ),
     hostIntegrationSources: normalizeHostIntegrationSources(undefined),
+    hostIntegrationConflictSettings:
+      DEFAULT_HOST_INTEGRATION_CONFLICT_SETTINGS,
     billingEnabled:
       process.env.BILLING_ENABLED === 'true' ||
       DEFAULT_SYSTEM_SETTINGS.billingEnabled,
@@ -3927,6 +4005,10 @@ export function saveSystemSettings(
   merged.hostIntegrationSources = normalizeHostIntegrationSources(
     merged.hostIntegrationSources,
   );
+  merged.hostIntegrationConflictSettings =
+    normalizeHostIntegrationConflictSettings(
+      merged.hostIntegrationConflictSettings,
+    );
   merged.billingMode = 'wallet_first';
   if (merged.billingMinStartBalanceUsd < 0)
     merged.billingMinStartBalanceUsd =

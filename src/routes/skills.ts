@@ -9,6 +9,7 @@ import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
 import { getSystemSettings, saveSystemSettings, type SystemSettings } from '../runtime-config.js';
 import {
+  getSkillsHostConflictOverview,
   getSkillsHostSyncSnapshot,
   syncHostIntegrationsForUser,
 } from '../host-integrations.js';
@@ -128,6 +129,30 @@ function discoverSkills(userId: string): Skill[] {
   return [...userSkills, ...projectSkills];
 }
 
+function updateSkillConflictOverride(
+  skillId: string,
+  mode: 'auto' | 'pinned',
+  pinnedSourceId?: string,
+) {
+  const settings = getSystemSettings();
+  const overrides =
+    settings.hostIntegrationConflictSettings?.overrides ?? [];
+  const nextOverrides = overrides.filter(
+    (item) => !(item.kind === 'skill' && item.itemId === skillId),
+  );
+  nextOverrides.push({
+    kind: 'skill',
+    itemId: skillId,
+    mode,
+    ...(mode === 'pinned' && pinnedSourceId ? { pinnedSourceId } : {}),
+  });
+  return saveSystemSettings({
+    hostIntegrationConflictSettings: {
+      overrides: nextOverrides,
+    },
+  });
+}
+
 function getSkillDetail(skillId: string, userId: string): SkillDetail | null {
   if (!validateSkillId(skillId)) return null;
 
@@ -210,7 +235,8 @@ function getSkillDetail(skillId: string, userId: string): SkillDetail | null {
 skillsRoutes.get('/', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
   const skills = discoverSkills(authUser.id);
-  return c.json({ skills });
+  const conflicts = getSkillsHostConflictOverview();
+  return c.json({ skills, conflicts });
 });
 
 
@@ -246,6 +272,36 @@ skillsRoutes.put('/sync-settings', authMiddleware, async (c) => {
     autoSyncEnabled: saved.skillAutoSyncEnabled,
     autoSyncIntervalMinutes: saved.skillAutoSyncIntervalMinutes,
   });
+});
+
+skillsRoutes.patch('/conflicts/:id', authMiddleware, async (c) => {
+  const authUser = c.get('user') as AuthUser;
+  if (authUser.role !== 'admin') {
+    return c.json({ error: 'Only admin can change host conflict settings' }, 403);
+  }
+
+  const id = c.req.param('id');
+  if (!validateSkillId(id)) {
+    return c.json({ error: 'Invalid skill ID' }, 400);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const mode =
+    body.mode === 'auto' ? 'auto' : body.mode === 'pinned' ? 'pinned' : null;
+  const pinnedSourceId =
+    typeof body.pinnedSourceId === 'string' && body.pinnedSourceId.trim()
+      ? body.pinnedSourceId.trim()
+      : undefined;
+
+  if (!mode) {
+    return c.json({ error: 'mode must be auto or pinned' }, 400);
+  }
+  if (mode === 'pinned' && !pinnedSourceId) {
+    return c.json({ error: 'pinned 模式必须指定来源' }, 400);
+  }
+
+  updateSkillConflictOverride(id, mode, pinnedSourceId);
+  return c.json({ success: true, conflicts: getSkillsHostConflictOverview() });
 });
 
 skillsRoutes.get('/:id', authMiddleware, (c) => {
