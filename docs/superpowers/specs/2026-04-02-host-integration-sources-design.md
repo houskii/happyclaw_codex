@@ -241,6 +241,10 @@ Skills 与 MCP Routes 都调用这层共享扫描器，避免重复实现。
 - 不阻断其他来源
 - 页面提供明确错误文本与重试入口
 
+## 关联设计
+
+- 冲突仲裁设计：`docs/superpowers/specs/2026-04-02-host-integration-conflict-design.md`
+
 ## 测试策略
 
 ### 后端
