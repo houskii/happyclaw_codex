@@ -218,7 +218,23 @@ export function HostIntegrationsPanel({ isAdmin, target, onSynced }: HostIntegra
                           </span>
                         )}
                       </div>
-                      <div className="text-sm text-muted-foreground">{source.path}</div>
+                      {source.kind === 'custom' && isAdmin ? (
+                        <div className="max-w-xl">
+                          <Input
+                            value={source.path}
+                            onChange={(e) =>
+                              updateSource(source.id, (current) => ({
+                                ...current,
+                                path: e.target.value,
+                                label: e.target.value || current.label,
+                              }))
+                            }
+                            placeholder="输入自定义来源路径"
+                          />
+                        </div>
+                      ) : (
+                        <div className="text-sm text-muted-foreground">{source.path}</div>
+                      )}
                       {statusSource.message && (
                         <div className="text-xs text-muted-foreground">{statusSource.message}</div>
                       )}
