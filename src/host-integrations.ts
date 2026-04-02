@@ -97,7 +97,11 @@ function getSourceSkillsPath(source: HostIntegrationSource): string {
 
 function getSourceMcpConfigPaths(source: HostIntegrationSource): string[] {
   const root = expandHomePath(source.path);
-  return [path.join(root, 'settings.json'), `${root}.json`];
+  return [
+    path.join(root, 'settings.json'),
+    path.join(root, 'config.toml'),
+    `${root}.json`,
+  ];
 }
 
 function getSkillsDirForUser(userId: string): string {
@@ -201,25 +205,45 @@ function scanSkillsFromSource(
 
   const skills: Record<string, string> = {};
   try {
-    for (const entry of fs.readdirSync(skillsPath, { withFileTypes: true })) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      if (!validateSkillId(entry.name)) continue;
+    const queue: Array<{ dir: string; depth: number }> = [{ dir: skillsPath, depth: 0 }];
+    const visited = new Set<string>();
 
-      const entryPath = path.join(skillsPath, entry.name);
-      let realPath = entryPath;
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) continue;
+
+      let realDir = current.dir;
       try {
-        if (fs.lstatSync(entryPath).isSymbolicLink()) {
-          realPath = fs.realpathSync(entryPath);
-        }
+        realDir = fs.realpathSync(current.dir);
       } catch {
-        continue;
+        realDir = current.dir;
       }
+      if (visited.has(realDir)) continue;
+      visited.add(realDir);
 
-      if (
-        fs.existsSync(path.join(realPath, 'SKILL.md')) ||
-        fs.existsSync(path.join(realPath, 'SKILL.md.disabled'))
-      ) {
-        skills[entry.name] = entryPath;
+      for (const entry of fs.readdirSync(current.dir, { withFileTypes: true })) {
+        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+
+        const entryPath = path.join(current.dir, entry.name);
+        let resolvedEntryPath = entryPath;
+        try {
+          if (fs.lstatSync(entryPath).isSymbolicLink()) {
+            resolvedEntryPath = fs.realpathSync(entryPath);
+          }
+        } catch {
+          continue;
+        }
+
+        const skillFileExists =
+          fs.existsSync(path.join(resolvedEntryPath, 'SKILL.md')) ||
+          fs.existsSync(path.join(resolvedEntryPath, 'SKILL.md.disabled'));
+        if (skillFileExists && validateSkillId(entry.name)) {
+          skills[entry.name] = entryPath;
+        }
+
+        if (current.depth < 2) {
+          queue.push({ dir: entryPath, depth: current.depth + 1 });
+        }
       }
     }
     return { skills };
@@ -229,6 +253,77 @@ function scanSkillsFromSource(
       error: err instanceof Error ? err.message : 'Failed to read skills path',
     };
   }
+}
+
+function parseTomlScalar(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed.replace(/^"(.*)"$/, '$1');
+  }
+}
+
+function parseCodexMcpToml(content: string): Record<string, Record<string, unknown>> {
+  const servers: Record<string, Record<string, unknown>> = {};
+  let currentServerId: string | null = null;
+  let currentSubsection: 'root' | 'env' | 'headers' | null = null;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const sectionMatch = line.match(/^\[(.+)\]$/);
+    if (sectionMatch) {
+      const parts = sectionMatch[1]
+        .split('.')
+        .map((part) => part.trim())
+        .filter(Boolean);
+      if (parts[0] !== 'mcp_servers' || parts.length < 2) {
+        currentServerId = null;
+        currentSubsection = null;
+        continue;
+      }
+
+      currentServerId = parts[1];
+      if (!servers[currentServerId]) servers[currentServerId] = {};
+
+      if (parts.length === 2) currentSubsection = 'root';
+      else if (parts[2] === 'env') currentSubsection = 'env';
+      else if (parts[2] === 'headers') currentSubsection = 'headers';
+      else currentSubsection = null;
+      continue;
+    }
+
+    if (!currentServerId || !currentSubsection) continue;
+
+    const assignmentMatch = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!assignmentMatch) continue;
+
+    const [, key, rawValue] = assignmentMatch;
+    const parsedValue = parseTomlScalar(rawValue);
+    const server = servers[currentServerId]!;
+
+    if (currentSubsection === 'root') {
+      server[key] = parsedValue;
+      continue;
+    }
+
+    const bagKey = currentSubsection;
+    const currentBag =
+      server[bagKey] && typeof server[bagKey] === 'object' && !Array.isArray(server[bagKey])
+        ? (server[bagKey] as Record<string, unknown>)
+        : {};
+    currentBag[key] = parsedValue;
+    server[bagKey] = currentBag;
+  }
+
+  return servers;
 }
 
 function normalizeHostMcpEntry(
@@ -273,9 +368,26 @@ function scanMcpFromSource(
 
   for (const configPath of configPaths) {
     if (!fs.existsSync(configPath)) continue;
-    let parsed: unknown;
+    let mcpServers: Record<string, unknown> = {};
     try {
-      parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const content = fs.readFileSync(configPath, 'utf8');
+      if (configPath.endsWith('.toml')) {
+        mcpServers = parseCodexMcpToml(content);
+      } else {
+        const parsed = JSON.parse(content);
+        mcpServers =
+          parsed &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed) &&
+          typeof (parsed as Record<string, unknown>).mcpServers === 'object' &&
+          (parsed as Record<string, unknown>).mcpServers !== null &&
+          !Array.isArray((parsed as Record<string, unknown>).mcpServers)
+            ? ((parsed as Record<string, unknown>).mcpServers as Record<
+                string,
+                unknown
+              >)
+            : {};
+      }
     } catch (err) {
       return {
         servers: {},
@@ -285,19 +397,6 @@ function scanMcpFromSource(
             : `Failed to parse ${configPath}`,
       };
     }
-
-    const mcpServers =
-      parsed &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed) &&
-      typeof (parsed as Record<string, unknown>).mcpServers === 'object' &&
-      (parsed as Record<string, unknown>).mcpServers !== null &&
-      !Array.isArray((parsed as Record<string, unknown>).mcpServers)
-        ? ((parsed as Record<string, unknown>).mcpServers as Record<
-            string,
-            unknown
-          >)
-        : {};
 
     for (const [id, rawEntry] of Object.entries(mcpServers)) {
       const normalized = normalizeHostMcpEntry(rawEntry);
