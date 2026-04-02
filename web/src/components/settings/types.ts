@@ -124,12 +124,22 @@ export interface SystemSettings {
   anthropicSdkBaseUrl: string;
   openaiSdkBaseUrl: string;
   hostIntegrationSources: HostIntegrationSource[];
+  dockerInjectedHostEnvKeys: string[];
   defaultClaudeModel?: string;
   defaultCodexModel?: string;
   claudeUsageApiUrl?: string;
   codexUsageApiUrl?: string;
   claudeSdkBaseUrl?: string;
   codexSdkBaseUrl?: string;
+}
+
+export interface HostEnvItem {
+  key: string;
+  value: string;
+}
+
+export interface HostEnvResponse {
+  items: HostEnvItem[];
 }
 
 export type HostIntegrationSourceKind = 'provider-default' | 'custom';

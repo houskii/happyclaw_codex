@@ -9,7 +9,8 @@ import { api } from '../../api/client';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
-import type { SystemSettings } from './types';
+import { Checkbox } from '@/components/ui/checkbox';
+import type { HostEnvItem, HostEnvResponse, SystemSettings } from './types';
 import { getErrorMessage } from './types';
 
 interface FieldConfig {
@@ -145,6 +146,9 @@ export function SystemSettingsSection() {
   const [openaiUsageApiUrl, setOpenaiUsageApiUrl] = useState('');
   const [anthropicSdkBaseUrl, setAnthropicSdkBaseUrl] = useState('');
   const [openaiSdkBaseUrl, setOpenaiSdkBaseUrl] = useState('');
+  const [hostEnvItems, setHostEnvItems] = useState<HostEnvItem[]>([]);
+  const [hostEnvSearch, setHostEnvSearch] = useState('');
+  const [dockerInjectedHostEnvKeys, setDockerInjectedHostEnvKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -158,7 +162,10 @@ export function SystemSettingsSection() {
     (async () => {
       setLoading(true);
       try {
-        const data = await api.get<SystemSettings>('/api/config/system');
+        const [data, hostEnv] = await Promise.all([
+          api.get<SystemSettings>('/api/config/system'),
+          api.get<HostEnvResponse>('/api/config/host-env'),
+        ]);
         setSettings(data);
         const display: Record<string, number> = {};
         for (const f of fields) {
@@ -177,6 +184,8 @@ export function SystemSettingsSection() {
         setOpenaiUsageApiUrl(data.openaiUsageApiUrl ?? data.codexUsageApiUrl ?? '');
         setAnthropicSdkBaseUrl(data.anthropicSdkBaseUrl ?? data.claudeSdkBaseUrl ?? '');
         setOpenaiSdkBaseUrl(data.openaiSdkBaseUrl ?? data.codexSdkBaseUrl ?? '');
+        setDockerInjectedHostEnvKeys(data.dockerInjectedHostEnvKeys ?? []);
+        setHostEnvItems(hostEnv.items ?? []);
       } catch (err) {
         toast.error(getErrorMessage(err, '加载系统参数失败'));
       } finally {
@@ -229,6 +238,7 @@ export function SystemSettingsSection() {
         openaiUsageApiUrl,
         anthropicSdkBaseUrl,
         openaiSdkBaseUrl,
+        dockerInjectedHostEnvKeys,
       };
       for (const f of fields) {
         const val = displayValues[f.key];
@@ -255,6 +265,7 @@ export function SystemSettingsSection() {
       setOpenaiUsageApiUrl(data.openaiUsageApiUrl ?? data.codexUsageApiUrl ?? '');
       setAnthropicSdkBaseUrl(data.anthropicSdkBaseUrl ?? data.claudeSdkBaseUrl ?? '');
       setOpenaiSdkBaseUrl(data.openaiSdkBaseUrl ?? data.codexSdkBaseUrl ?? '');
+      setDockerInjectedHostEnvKeys(data.dockerInjectedHostEnvKeys ?? []);
       // 刷新计费状态，更新导航栏可见性
       loadBillingStatus();
       toast.success('系统参数已保存，新参数将对后续启动的容器/进程生效');
@@ -278,6 +289,19 @@ export function SystemSettingsSection() {
   }
 
   if (!settings) return null;
+
+  const filteredHostEnvItems = hostEnvItems.filter((item) =>
+    item.key.toLowerCase().includes(hostEnvSearch.trim().toLowerCase()),
+  );
+
+  const handleToggleDockerInjectedEnv = (key: string, checked: boolean) => {
+    setDockerInjectedHostEnvKeys((prev) => {
+      if (checked) {
+        return [...new Set([...prev, key])].sort((a, b) => a.localeCompare(b));
+      }
+      return prev.filter((item) => item !== key);
+    });
+  };
 
   return (
     <div className="space-y-6">
@@ -503,6 +527,9 @@ export function SystemSettingsSection() {
             placeholder="gpt-5.4 / gpt-5.3 / 自定义模型 ID"
             className="max-w-md font-mono"
           />
+          <p className="text-xs text-muted-foreground mt-1">
+            留空则使用 OpenAI / Codex 配置中的默认模型，最终由当前激活的配置与 Provider 决定。
+          </p>
         </div>
       </div>
 
@@ -526,6 +553,61 @@ export function SystemSettingsSection() {
         <div>
           <label className="block text-sm font-medium text-foreground mb-1">OpenAI SDK Base URL</label>
           <Input value={openaiSdkBaseUrl} onChange={(e) => setOpenaiSdkBaseUrl(e.target.value)} placeholder="https://..." className="max-w-2xl font-mono" />
+        </div>
+      </div>
+
+      <div className="border-t border-border pt-6 space-y-5">
+        <h3 className="text-sm font-semibold text-foreground">Docker 环境注入</h3>
+        <p className="text-xs text-muted-foreground -mt-3">
+          从当前宿主机环境变量中选择需要自动注入到所有 Docker 工作区的键。变量值会在容器启动时从宿主机实时读取。
+        </p>
+        <div className="space-y-3">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <Input
+              type="text"
+              value={hostEnvSearch}
+              onChange={(e) => setHostEnvSearch(e.target.value)}
+              placeholder="搜索环境变量，例如 HTTP_PROXY"
+              className="max-w-md font-mono"
+            />
+            <p className="text-xs text-muted-foreground">
+              已选择 {dockerInjectedHostEnvKeys.length} 项
+            </p>
+          </div>
+          <div className="max-h-72 overflow-y-auto rounded-md border border-border">
+            {filteredHostEnvItems.length > 0 ? (
+              <div className="divide-y divide-border">
+                {filteredHostEnvItems.map((item) => {
+                  const checked = dockerInjectedHostEnvKeys.includes(item.key);
+                  return (
+                    <label
+                      key={item.key}
+                      className="flex cursor-pointer items-start justify-between gap-3 px-3 py-2 hover:bg-muted/40"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="font-mono text-sm text-foreground break-all">{item.key}</p>
+                        <p className="mt-1 font-mono text-xs text-muted-foreground break-all whitespace-pre-wrap">
+                          {item.value || '(空值)'}
+                        </p>
+                      </div>
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={(value) => handleToggleDockerInjectedEnv(item.key, value === true)}
+                        aria-label={`注入环境变量 ${item.key}`}
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="px-3 py-6 text-sm text-muted-foreground">
+                {hostEnvItems.length === 0 ? '当前宿主机未发现可注入的环境变量。' : '没有匹配的环境变量。'}
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            已自动排除高风险键和格式非法的环境变量名称。
+          </p>
         </div>
       </div>
       <div>

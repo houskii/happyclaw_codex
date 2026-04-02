@@ -212,6 +212,10 @@ export const GroupPatchSchema = z.object({
     .enum(['auto', 'always', 'when_mentioned', 'disabled'])
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
+  custom_cwd: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
   llm_provider: WorkspaceLlmProviderSchema.optional(),
   model: TrimmedNullableString,
   thinking_effort: ThinkingEffortSchema.nullable().optional(),
@@ -285,6 +289,7 @@ export const SystemSettingsSchema = z.object({
   scriptTimeout: z.number().int().min(5000).max(600000).optional(),
   skillAutoSyncEnabled: z.boolean().optional(),
   skillAutoSyncIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+  dockerInjectedHostEnvKeys: z.array(z.string().min(1).max(256)).optional(),
   billingEnabled: z.boolean().optional(),
   billingMode: z.literal('wallet_first').optional(),
   billingMinStartBalanceUsd: z.number().min(0).max(1000000).optional(),

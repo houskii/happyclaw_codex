@@ -69,6 +69,7 @@ import {
   saveAppearanceConfig,
   getSystemSettings,
   saveSystemSettings,
+  listInjectableHostEnvItems,
   getUserFeishuConfig,
   saveUserFeishuConfig,
   getUserTelegramConfig,
@@ -1603,6 +1604,22 @@ configRoutes.put(
         err instanceof Error ? err.message : 'Invalid system settings payload';
       logger.warn({ err }, 'Invalid system settings payload');
       return c.json({ error: message }, 400);
+    }
+  },
+);
+
+configRoutes.get(
+  '/host-env',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    try {
+      return c.json({
+        items: listInjectableHostEnvItems(),
+      });
+    } catch (err) {
+      logger.error({ err }, 'Failed to load injectable host env keys');
+      return c.json({ error: 'Failed to load host environment' }, 500);
     }
   },
 );

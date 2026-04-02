@@ -2677,6 +2677,14 @@ export function buildContainerEnvLines(
 ): string[] {
   const merged = mergeClaudeEnvConfig(global, override);
   const lines = buildClaudeEnvLines(merged, profileCustomEnv);
+  const systemSettings = getSystemSettings();
+
+  for (const key of systemSettings.dockerInjectedHostEnvKeys) {
+    if (!ENV_KEY_RE.test(key) || DANGEROUS_ENV_VARS.has(key)) continue;
+    const value = process.env[key];
+    if (typeof value !== 'string' || !value.length) continue;
+    lines.push(`${key}=${value.replace(/[\r\n\0]/g, '')}`);
+  }
 
   // Append custom env vars (with safety sanitization as defense-in-depth)
   if (override.customEnv) {
@@ -2704,6 +2712,22 @@ export function buildContainerEnvLines(
   }
 
   return lines;
+}
+
+export interface InjectableHostEnvItem {
+  key: string;
+  value: string;
+}
+
+export function listInjectableHostEnvItems(): InjectableHostEnvItem[] {
+  return Object.entries(process.env)
+    .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+    .filter(([key]) => ENV_KEY_RE.test(key) && !DANGEROUS_ENV_VARS.has(key))
+    .map(([key, value]) => ({
+      key,
+      value: value.replace(/[\u0000-\u001F\u007F]/g, ' ').trim(),
+    }))
+    .sort((a, b) => a.key.localeCompare(b.key));
 }
 
 // ─── OAuth credentials file management ────────────────────────────
@@ -3413,6 +3437,7 @@ export interface SystemSettings {
   // Skills auto-sync
   skillAutoSyncEnabled: boolean;
   skillAutoSyncIntervalMinutes: number;
+  dockerInjectedHostEnvKeys: string[];
   hostIntegrationSources: HostIntegrationSource[];
   hostIntegrationConflictSettings: HostIntegrationConflictSettings;
   // Billing
@@ -3621,6 +3646,20 @@ function normalizeHostIntegrationConflictSettings(
   };
 }
 
+function normalizeDockerInjectedHostEnvKeys(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const unique = new Set<string>();
+  for (const item of input) {
+    if (typeof item !== 'string') continue;
+    const key = item.trim();
+    if (!key || !ENV_KEY_RE.test(key) || DANGEROUS_ENV_VARS.has(key)) {
+      continue;
+    }
+    unique.add(key);
+  }
+  return Array.from(unique.values()).sort((a, b) => a.localeCompare(b));
+}
+
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   containerTimeout: 1800000,
   idleTimeout: 1500000,
@@ -3633,6 +3672,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   scriptTimeout: 60000,
   skillAutoSyncEnabled: false,
   skillAutoSyncIntervalMinutes: 10,
+  dockerInjectedHostEnvKeys: [],
   hostIntegrationSources: DEFAULT_HOST_INTEGRATION_SOURCES,
   hostIntegrationConflictSettings:
     DEFAULT_HOST_INTEGRATION_CONFLICT_SETTINGS,
@@ -3730,6 +3770,9 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       raw.skillAutoSyncIntervalMinutes >= 1
         ? raw.skillAutoSyncIntervalMinutes
         : DEFAULT_SYSTEM_SETTINGS.skillAutoSyncIntervalMinutes,
+    dockerInjectedHostEnvKeys: normalizeDockerInjectedHostEnvKeys(
+      raw.dockerInjectedHostEnvKeys,
+    ),
     hostIntegrationSources: normalizeHostIntegrationSources(
       raw.hostIntegrationSources,
     ),
@@ -3865,6 +3908,11 @@ function buildEnvFallbackSettings(): SystemSettings {
     skillAutoSyncIntervalMinutes: parseIntEnv(
       process.env.SKILL_AUTO_SYNC_INTERVAL_MINUTES,
       DEFAULT_SYSTEM_SETTINGS.skillAutoSyncIntervalMinutes,
+    ),
+    dockerInjectedHostEnvKeys: normalizeDockerInjectedHostEnvKeys(
+      process.env.DOCKER_INJECTED_HOST_ENV_KEYS?.split(',').map((item) =>
+        item.trim(),
+      ),
     ),
     hostIntegrationSources: normalizeHostIntegrationSources(undefined),
     hostIntegrationConflictSettings:
@@ -4002,6 +4050,9 @@ export function saveSystemSettings(
     merged.skillAutoSyncIntervalMinutes = 1;
   if (merged.skillAutoSyncIntervalMinutes > 1440)
     merged.skillAutoSyncIntervalMinutes = 1440; // max 24h
+  merged.dockerInjectedHostEnvKeys = normalizeDockerInjectedHostEnvKeys(
+    merged.dockerInjectedHostEnvKeys,
+  );
   merged.hostIntegrationSources = normalizeHostIntegrationSources(
     merged.hostIntegrationSources,
   );

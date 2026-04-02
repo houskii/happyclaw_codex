@@ -706,6 +706,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned,
     activation_mode,
     execution_mode,
+    custom_cwd,
     llm_provider,
     model,
     thinking_effort,
@@ -720,6 +721,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned === undefined &&
     activation_mode === undefined &&
     execution_mode === undefined &&
+    custom_cwd === undefined &&
     llm_provider === undefined &&
     model === undefined &&
     thinking_effort === undefined &&
@@ -745,12 +747,74 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     );
   }
 
+  const nextExecutionMode =
+    execution_mode !== undefined
+      ? (execution_mode as ExecutionMode)
+      : existing.executionMode;
+
+  let resolvedCustomCwd: string | undefined = existing.customCwd;
+  if (custom_cwd !== undefined) {
+    if (nextExecutionMode !== 'host') {
+      return c.json({ error: 'custom_cwd is only valid for host mode' }, 400);
+    }
+    if (!path.isAbsolute(custom_cwd)) {
+      return c.json({ error: 'custom_cwd must be an absolute path' }, 400);
+    }
+    let realPath: string;
+    let stat: fs.Stats;
+    try {
+      realPath = fs.realpathSync.native(custom_cwd);
+      stat = fs.statSync(realPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return c.json({ error: 'custom_cwd directory does not exist' }, 400);
+      }
+      throw error;
+    }
+    if (!stat.isDirectory()) {
+      return c.json({ error: 'custom_cwd must be an existing directory' }, 400);
+    }
+    const allowlist = loadMountAllowlist();
+    if (!allowlist) {
+      return c.json(
+        {
+          error:
+            'mount allowlist is unavailable. Check config/mount-allowlist.json before using custom_cwd',
+        },
+        400,
+      );
+    }
+    const allowedRoot = findAllowedRoot(realPath, allowlist.allowedRoots);
+    if (!allowedRoot) {
+      const allowedPaths = allowlist.allowedRoots.join(', ');
+      return c.json(
+        {
+          error: `custom_cwd must be under an allowed root. Allowed roots: ${allowedPaths}. Check config/mount-allowlist.json`,
+        },
+        400,
+      );
+    }
+    if (matchesBlockedPattern(realPath, allowlist.blockedPatterns)) {
+      return c.json(
+        {
+          error:
+            'custom_cwd matches a blocked path pattern. Check config/mount-allowlist.json',
+        },
+        400,
+      );
+    }
+    resolvedCustomCwd = realPath;
+  } else if (execution_mode === 'container') {
+    resolvedCustomCwd = undefined;
+  }
+
   // Pin/unpin only requires canAccessGroup (it's a per-user preference)
   const isPinOnly =
     is_pinned !== undefined &&
     !name &&
     activation_mode === undefined &&
-    execution_mode === undefined;
+    execution_mode === undefined &&
+    custom_cwd === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -794,6 +858,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
 
   // Update registered group if name, activation_mode, or execution_mode changed
   const runtimeSettingsChanged =
+    execution_mode !== undefined ||
+    custom_cwd !== undefined ||
     llm_provider !== undefined ||
     model !== undefined ||
     thinking_effort !== undefined ||
@@ -815,7 +881,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         execution_mode !== undefined
           ? (execution_mode as ExecutionMode)
           : existing.executionMode,
-      customCwd: existing.customCwd,
+      customCwd: resolvedCustomCwd,
       initSourcePath: existing.initSourcePath,
       initGitUrl: existing.initGitUrl,
       created_by: existing.created_by,

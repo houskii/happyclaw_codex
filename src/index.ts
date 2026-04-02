@@ -105,6 +105,11 @@ import {
   resolveLocationInfo,
   type WorkspaceInfo,
 } from './im-command-utils.js';
+import {
+  loadMountAllowlist,
+  findAllowedRoot,
+  matchesBlockedPattern,
+} from './mount-security.js';
 import { invalidateSessionCache, getWebDeps } from './web-context.js';
 import {
   getFeishuProviderConfigWithSource,
@@ -117,6 +122,8 @@ import {
   getUserDingTalkConfig,
   getUserIMPreferences,
   getSystemSettings,
+  getContainerEnvConfig,
+  saveContainerEnvConfig,
   saveUserFeishuConfig,
   saveUserTelegramConfig,
   updateAllSessionCredentials,
@@ -1077,6 +1084,8 @@ async function handleCommand(
       return handleBindCommand(chatJid, rawArgs);
     case 'new':
       return handleNewCommand(chatJid, rawArgs);
+    case 'modify':
+      return handleModifyCommand(chatJid, rawArgs);
     case 'require_mention':
       return handleRequireMentionCommand(chatJid, rawArgs);
     case 'sw':
@@ -1098,6 +1107,8 @@ function handleHelpCommand(): string {
     '/unbind — 解绑回默认工作区\n' +
     '/new <名称> [--provider claude|openai] [--mode container|host] [--workspace <目录>] — 新建工作区并绑定此群\n' +
     '/new --help — 查看 /new 参数说明\n' +
+    '/modify [--provider claude|openai] [--mode container|host] [--workspace <目录>] [--env KEY=VALUE] [--unset-env KEY] — 修改当前工作区\n' +
+    '/modify --help — 查看 /modify 参数说明\n' +
     '/clear — 清除当前会话上下文\n' +
     '/recall — 总结最近对话\n' +
     '/require_mention true|false — 设置群聊是否必须 @ 机器人才响应'
@@ -1191,6 +1202,111 @@ function formatNewCommandHelp(): string {
     '- --provider 可选，默认跟随系统默认 Provider\n' +
     '- --mode 可选，默认自动选择（有 Docker 时 container，否则 host）\n' +
     '- --workspace 仅在 host 模式下生效，表示宿主机工作目录（绝对路径）'
+  );
+}
+
+function parseModifyCommandArgs(rawArgs: string): {
+  help: boolean;
+  llmProvider?: 'claude' | 'openai';
+  executionMode?: 'container' | 'host';
+  customCwd?: string;
+  setEnv: Record<string, string>;
+  unsetEnv: string[];
+  error?: string;
+} {
+  const tokens = tokenizeCommandArgs(rawArgs);
+  let help = false;
+  let llmProvider: 'claude' | 'openai' | undefined;
+  let executionMode: 'container' | 'host' | undefined;
+  let customCwd: string | undefined;
+  const setEnv: Record<string, string> = {};
+  const unsetEnv: string[] = [];
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === '--help' || token === '-h') {
+      help = true;
+      continue;
+    }
+    if (token === '--provider') {
+      const value = tokens[i + 1]?.toLowerCase();
+      if (!value) return { help, setEnv, unsetEnv, error: '缺少 --provider 的值' };
+      if (value !== 'claude' && value !== 'openai') {
+        return { help, setEnv, unsetEnv, error: 'Provider 仅支持 claude 或 openai' };
+      }
+      llmProvider = value;
+      i += 1;
+      continue;
+    }
+    if (token === '--mode') {
+      const value = tokens[i + 1]?.toLowerCase();
+      if (!value) return { help, setEnv, unsetEnv, error: '缺少 --mode 的值' };
+      if (value !== 'container' && value !== 'host') {
+        return { help, setEnv, unsetEnv, error: '模式仅支持 container 或 host' };
+      }
+      executionMode = value;
+      i += 1;
+      continue;
+    }
+    if (token === '--workspace') {
+      const value = tokens[i + 1];
+      if (!value) return { help, setEnv, unsetEnv, error: '缺少 --workspace 的值' };
+      customCwd = value.trim() || undefined;
+      i += 1;
+      continue;
+    }
+    if (token === '--env') {
+      const value = tokens[i + 1];
+      if (!value) return { help, setEnv, unsetEnv, error: '缺少 --env 的值' };
+      const eqIndex = value.indexOf('=');
+      if (eqIndex <= 0) {
+        return { help, setEnv, unsetEnv, error: '--env 必须使用 KEY=VALUE 格式' };
+      }
+      const key = value.slice(0, eqIndex).trim();
+      const envValue = value.slice(eqIndex + 1);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        return { help, setEnv, unsetEnv, error: `无效环境变量名: ${key}` };
+      }
+      setEnv[key] = envValue;
+      i += 1;
+      continue;
+    }
+    if (token === '--unset-env') {
+      const value = tokens[i + 1]?.trim();
+      if (!value) return { help, setEnv, unsetEnv, error: '缺少 --unset-env 的值' };
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+        return { help, setEnv, unsetEnv, error: `无效环境变量名: ${value}` };
+      }
+      unsetEnv.push(value);
+      i += 1;
+      continue;
+    }
+    return { help, setEnv, unsetEnv, error: `未知参数: ${token}` };
+  }
+
+  return {
+    help,
+    llmProvider,
+    executionMode,
+    customCwd,
+    setEnv,
+    unsetEnv,
+  };
+}
+
+function formatModifyCommandHelp(): string {
+  return (
+    '用法：\n' +
+    '/modify [--provider claude|openai] [--mode container|host] [--workspace <目录>] [--env KEY=VALUE] [--unset-env KEY]\n\n' +
+    '示例：\n' +
+    '/modify --provider openai\n' +
+    '/modify --mode host --workspace /Users/me/projects/support\n' +
+    '/modify --env HTTP_PROXY=http://127.0.0.1:7890 --env NO_PROXY=localhost,127.0.0.1\n' +
+    '/modify --unset-env HTTP_PROXY\n\n' +
+    '说明：\n' +
+    '- 默认修改当前聊天绑定的工作区\n' +
+    '- --workspace 仅在 host 模式下生效，表示宿主机工作目录（绝对路径）\n' +
+    '- --env / --unset-env 修改当前工作区的环境变量覆盖，并在容器模式下触发重建'
   );
 }
 
@@ -1478,6 +1594,165 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
   imSendFailCounts.delete(chatJid);
   imHealthCheckFailCounts.delete(chatJid);
   return `已切换到 ${resolved.display}\n🔁 回复策略: source_only`;
+}
+
+function resolveCurrentWorkspaceJid(chatJid: string): string | null {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return null;
+  if (group.target_agent_id) {
+    const agent = getAgent(group.target_agent_id);
+    return agent?.chat_jid ?? null;
+  }
+  if (group.target_main_jid) {
+    let targetJid = group.target_main_jid;
+    if (
+      !registeredGroups[targetJid] &&
+      !getRegisteredGroup(targetJid) &&
+      targetJid.startsWith('web:')
+    ) {
+      const folder = targetJid.slice(4);
+      const jids = getJidsByFolder(folder);
+      targetJid = jids.find((jid) => jid.startsWith('web:')) ?? targetJid;
+    }
+    return targetJid;
+  }
+  return chatJid;
+}
+
+async function handleModifyCommand(
+  chatJid: string,
+  rawArgs: string,
+): Promise<string> {
+  const parsed = parseModifyCommandArgs(rawArgs);
+  if (parsed.help) return formatModifyCommandHelp();
+  if (parsed.error) return `${parsed.error}\n\n${formatModifyCommandHelp()}`;
+
+  const workspaceJid = resolveCurrentWorkspaceJid(chatJid);
+  if (!workspaceJid) return '未找到当前绑定的工作区';
+  const existing = registeredGroups[workspaceJid] ?? getRegisteredGroup(workspaceJid);
+  if (!existing) return '未找到当前绑定的工作区';
+
+  const owner = existing.created_by ? getUserById(existing.created_by) : null;
+  const nextExecutionMode =
+    parsed.executionMode ?? existing.executionMode ?? 'container';
+
+  if (nextExecutionMode === 'host' && owner?.role !== 'admin') {
+    return '仅管理员可以将工作区切换到宿主机模式';
+  }
+
+  let resolvedCustomCwd =
+    parsed.customCwd !== undefined ? parsed.customCwd : existing.customCwd;
+  if (parsed.customCwd !== undefined || parsed.executionMode !== undefined) {
+    if (nextExecutionMode === 'host') {
+      if (!resolvedCustomCwd) {
+        return 'host 模式需要同时指定 --workspace <绝对路径>';
+      }
+      if (!path.isAbsolute(resolvedCustomCwd)) {
+        return '--workspace 必须是绝对路径';
+      }
+      let realPath: string;
+      try {
+        realPath = fs.realpathSync.native(resolvedCustomCwd);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return '--workspace 指定的目录不存在';
+        }
+        throw error;
+      }
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(realPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return '--workspace 指定的目录不存在';
+        }
+        throw error;
+      }
+      if (!stat.isDirectory()) {
+        return '--workspace 必须是已存在的目录';
+      }
+      const allowlist = loadMountAllowlist();
+      if (!allowlist) {
+        return '未找到或无法读取 config/mount-allowlist.json，暂不允许使用 --workspace';
+      }
+      const allowedRoot = findAllowedRoot(realPath, allowlist.allowedRoots);
+      if (!allowedRoot) {
+        return `--workspace 必须位于允许挂载的根目录下：${allowlist.allowedRoots.join(', ')}`;
+      }
+      if (matchesBlockedPattern(realPath, allowlist.blockedPatterns)) {
+        return '--workspace 命中了受限路径规则，请检查 config/mount-allowlist.json';
+      }
+      resolvedCustomCwd = realPath;
+    } else {
+      resolvedCustomCwd = undefined;
+    }
+  }
+
+  const setEnvKeys = Object.keys(parsed.setEnv);
+  const hasEnvChanges = setEnvKeys.length > 0 || parsed.unsetEnv.length > 0;
+  const hasRuntimeChanges =
+    parsed.llmProvider !== undefined ||
+    parsed.executionMode !== undefined ||
+    parsed.customCwd !== undefined;
+
+  if (!hasRuntimeChanges && !hasEnvChanges) {
+    return formatModifyCommandHelp();
+  }
+
+  if (hasRuntimeChanges) {
+    const updated: RegisteredGroup = {
+      ...existing,
+      executionMode: nextExecutionMode,
+      customCwd: resolvedCustomCwd,
+      llm_provider: parsed.llmProvider ?? existing.llm_provider,
+    };
+    setRegisteredGroup(workspaceJid, updated);
+    registeredGroups[workspaceJid] = updated;
+  }
+
+  if (hasEnvChanges) {
+    const currentEnv = getContainerEnvConfig(existing.folder);
+    const nextCustomEnv = { ...(currentEnv.customEnv || {}) };
+    for (const [key, value] of Object.entries(parsed.setEnv)) {
+      nextCustomEnv[key] = value;
+    }
+    for (const key of parsed.unsetEnv) {
+      delete nextCustomEnv[key];
+    }
+    saveContainerEnvConfig(existing.folder, {
+      ...currentEnv,
+      customEnv:
+        Object.keys(nextCustomEnv).length > 0 ? nextCustomEnv : undefined,
+    });
+  }
+
+  const summary: string[] = [];
+  if (parsed.llmProvider) summary.push(`Provider=${parsed.llmProvider}`);
+  if (parsed.executionMode) summary.push(`模式=${parsed.executionMode}`);
+  if (parsed.customCwd !== undefined && nextExecutionMode === 'host') {
+    summary.push(`工作目录=${resolvedCustomCwd}`);
+  }
+  if (setEnvKeys.length > 0) {
+    summary.push(`设置环境变量=${setEnvKeys.join(', ')}`);
+  }
+  if (parsed.unsetEnv.length > 0) {
+    summary.push(`移除环境变量=${parsed.unsetEnv.join(', ')}`);
+  }
+
+  try {
+    if (hasEnvChanges) {
+      await queue.restartGroup(workspaceJid);
+    } else if (hasRuntimeChanges) {
+      await queue.stopGroup(workspaceJid);
+    }
+  } catch (err) {
+    logger.warn(
+      { chatJid, workspaceJid, err },
+      'Failed to restart/stop workspace after /modify',
+    );
+  }
+
+  return `当前工作区已更新\n${summary.map((item) => `- ${item}`).join('\n')}`;
 }
 
 async function handleNewCommand(
