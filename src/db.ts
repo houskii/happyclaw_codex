@@ -655,6 +655,11 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
   ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
+  ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
+  ensureColumn('registered_groups', 'model', 'TEXT');
+  ensureColumn('registered_groups', 'thinking_effort', 'TEXT');
+  ensureColumn('registered_groups', 'context_compression', 'TEXT');
+  ensureColumn('registered_groups', 'knowledge_extraction', 'INTEGER DEFAULT 0');
   ensureColumn('messages', 'token_usage', 'TEXT');
   ensureColumn('messages', 'turn_id', 'TEXT');
   ensureColumn('messages', 'session_id', 'TEXT');
@@ -698,9 +703,16 @@ export function initDatabase(): void {
           init_source_path TEXT,
           init_git_url TEXT,
           created_by TEXT,
-          is_home INTEGER DEFAULT 0
+          is_home INTEGER DEFAULT 0,
+          llm_provider TEXT DEFAULT 'claude',
+          model TEXT,
+          thinking_effort TEXT,
+          context_compression TEXT,
+          knowledge_extraction INTEGER DEFAULT 0
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
+        INSERT INTO registered_groups_new
+          (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
+          SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0, 'claude', NULL, NULL, NULL, 0 FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -754,6 +766,11 @@ export function initDatabase(): void {
       'target_agent_id',
       'target_main_jid',
       'reply_policy',
+      'llm_provider',
+      'model',
+      'thinking_effort',
+      'context_compression',
+      'knowledge_extraction',
     ],
     ['trigger_pattern', 'requires_trigger'],
   );
@@ -2284,6 +2301,11 @@ type RegisteredGroupRow = {
   activation_mode: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
+  llm_provider: string | null;
+  model: string | null;
+  thinking_effort: string | null;
+  context_compression: string | null;
+  knowledge_extraction: number | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2309,6 +2331,16 @@ function parseGroupRow(
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
     require_mention: row.require_mention === 1,
     activation_mode: parseActivationMode(row.activation_mode),
+    llm_provider: row.llm_provider === 'openai' ? 'openai' : 'claude',
+    model: row.model ?? undefined,
+    thinking_effort:
+      row.thinking_effort === 'low' ||
+      row.thinking_effort === 'medium' ||
+      row.thinking_effort === 'high'
+        ? row.thinking_effort
+        : undefined,
+    context_compression: row.context_compression ?? undefined,
+    knowledge_extraction: row.knowledge_extraction === 1,
   };
 }
 
@@ -2339,8 +2371,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2361,6 +2393,11 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.activation_mode ?? 'auto',
     'inherit', // mcp_mode: deprecated, always inherit (user-level MCP applies globally)
     null, // selected_mcps: deprecated, always null
+    group.llm_provider ?? 'claude',
+    group.model ?? null,
+    group.thinking_effort ?? null,
+    group.context_compression ?? null,
+    group.knowledge_extraction === true ? 1 : 0,
   );
 }
 

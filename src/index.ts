@@ -1096,8 +1096,7 @@ function handleHelpCommand(): string {
     '/where — 查看当前绑定位置\n' +
     '/bind <workspace> 或 /bind <workspace>/<agent短ID> — 绑定到已有工作区\n' +
     '/unbind — 解绑回默认工作区\n' +
-    '/new <名称> [--provider claude|openai] [--mode container|host] — 新建工作区并绑定此群\n' +
-    '/new --workspace <名称> [--provider claude|openai] [--mode container|host] — 同上\n' +
+    '/new <名称> [--provider claude|openai] [--mode container|host] [--workspace <目录>] — 新建工作区并绑定此群\n' +
     '/new --help — 查看 /new 参数说明\n' +
     '/clear — 清除当前会话上下文\n' +
     '/recall — 总结最近对话\n' +
@@ -1120,6 +1119,7 @@ function parseNewCommandArgs(rawArgs: string): {
   name?: string;
   llmProvider?: 'claude' | 'openai';
   executionMode?: 'container' | 'host';
+  customCwd?: string;
   error?: string;
 } {
   const tokens = tokenizeCommandArgs(rawArgs);
@@ -1128,6 +1128,7 @@ function parseNewCommandArgs(rawArgs: string): {
   let help = false;
   let llmProvider: 'claude' | 'openai' | undefined;
   let executionMode: 'container' | 'host' | undefined;
+  let customCwd: string | undefined;
   const nameTokens: string[] = [];
 
   for (let i = 0; i < tokens.length; i += 1) {
@@ -1159,7 +1160,7 @@ function parseNewCommandArgs(rawArgs: string): {
     if (token === '--workspace') {
       const value = tokens[i + 1];
       if (!value) return { help, error: '缺少 --workspace 的值' };
-      nameTokens.push(value);
+      customCwd = value.trim() || undefined;
       i += 1;
       continue;
     }
@@ -1174,21 +1175,22 @@ function parseNewCommandArgs(rawArgs: string): {
     name: nameTokens.join(' ').trim() || undefined,
     llmProvider,
     executionMode,
+    customCwd,
   };
 }
 
 function formatNewCommandHelp(): string {
   return (
     '用法：\n' +
-    '/new <名称> [--provider claude|openai] [--mode container|host]\n' +
-    '/new --workspace <名称> [--provider claude|openai] [--mode container|host]\n\n' +
+    '/new <名称> [--provider claude|openai] [--mode container|host] [--workspace <目录>]\n\n' +
     '示例：\n' +
-    '/new 客服工作台 --provider openai --mode host\n' +
-    '/new --workspace Debug Sandbox --provider claude --mode container\n\n' +
+    '/new 客服工作台 --provider openai --mode host --workspace /Users/me/projects/support\n' +
+    '/new Debug Sandbox --provider claude --mode container\n\n' +
     '说明：\n' +
-    '- 名称为工作区名称，支持用引号包裹空格\n' +
+    '- 第一个非参数值为工作区名称，支持用引号包裹空格\n' +
     '- --provider 可选，默认跟随系统默认 Provider\n' +
-    '- --mode 可选，默认自动选择（有 Docker 时 container，否则 host）'
+    '- --mode 可选，默认自动选择（有 Docker 时 container，否则 host）\n' +
+    '- --workspace 仅在 host 模式下生效，表示宿主机工作目录（绝对路径）'
   );
 }
 
@@ -1495,8 +1497,18 @@ async function handleNewCommand(
   if (!name) return formatNewCommandHelp();
   if (name.length > 50) return '名称过长（最多 50 字符）';
 
+  if (parsed.customCwd && parsed.executionMode === 'container') {
+    return '--workspace 仅支持 host 模式工作区';
+  }
+
   const owner = getUserById(userId);
-  if (parsed.executionMode === 'host' && owner?.role !== 'admin') {
+  const executionMode =
+    parsed.executionMode ??
+    (parsed.customCwd
+      ? 'host'
+      : (await isDockerAvailable()) ? 'container' : 'host');
+
+  if (executionMode === 'host' && owner?.role !== 'admin') {
     return '仅管理员可以通过 /new 创建宿主机模式工作区';
   }
 
@@ -1505,14 +1517,13 @@ async function handleNewCommand(
   const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();
   const defaultLlmBinding = getDefaultLlmBinding();
-  const executionMode =
-    parsed.executionMode ?? ((await isDockerAvailable()) ? 'container' : 'host');
 
   const newGroup: RegisteredGroup = {
     name,
     folder,
     added_at: now,
     executionMode,
+    customCwd: executionMode === 'host' ? parsed.customCwd : undefined,
     created_by: userId,
     ...defaultLlmBinding,
     llm_provider: parsed.llmProvider ?? defaultLlmBinding.llm_provider,
@@ -6412,7 +6423,7 @@ function buildTelegramBotAddedHandler(
     onNewChat(chatJid, chatName);
     const welcome =
       `已加入「${chatName}」！当前绑定到默认工作区。\n\n` +
-      `/new <名称> [--provider openai] [--mode host] — 新建工作区并绑定此群\n` +
+      `/new <名称> [--provider openai] [--mode host] [--workspace /path] — 新建工作区并绑定此群\n` +
       `/bind <工作区> — 绑定到已有工作区\n` +
       `/list — 查看所有工作区\n` +
       `/help — 查看完整指令说明\n\n` +
