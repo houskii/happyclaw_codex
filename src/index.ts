@@ -1057,6 +1057,8 @@ async function handleCommand(
   const rawArgs = command.slice(parts[0].length).trim();
 
   switch (cmd) {
+    case 'help':
+      return handleHelpCommand();
     case 'clear':
       return handleClearCommand(chatJid);
     case 'list':
@@ -1083,6 +1085,111 @@ async function handleCommand(
     default:
       return null;
   }
+}
+
+function handleHelpCommand(): string {
+  return (
+    '可用指令：\n' +
+    '/help — 查看指令说明\n' +
+    '/list — 查看所有工作区\n' +
+    '/status — 查看当前队列与运行状态\n' +
+    '/where — 查看当前绑定位置\n' +
+    '/bind <workspace> 或 /bind <workspace>/<agent短ID> — 绑定到已有工作区\n' +
+    '/unbind — 解绑回默认工作区\n' +
+    '/new <名称> [--provider claude|openai] [--mode container|host] — 新建工作区并绑定此群\n' +
+    '/new --workspace <名称> [--provider claude|openai] [--mode container|host] — 同上\n' +
+    '/new --help — 查看 /new 参数说明\n' +
+    '/clear — 清除当前会话上下文\n' +
+    '/recall — 总结最近对话\n' +
+    '/require_mention true|false — 设置群聊是否必须 @ 机器人才响应'
+  );
+}
+
+function tokenizeCommandArgs(input: string): string[] {
+  const tokens: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(input)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3]);
+  }
+  return tokens;
+}
+
+function parseNewCommandArgs(rawArgs: string): {
+  help: boolean;
+  name?: string;
+  llmProvider?: 'claude' | 'openai';
+  executionMode?: 'container' | 'host';
+  error?: string;
+} {
+  const tokens = tokenizeCommandArgs(rawArgs);
+  if (tokens.length === 0) return { help: false };
+
+  let help = false;
+  let llmProvider: 'claude' | 'openai' | undefined;
+  let executionMode: 'container' | 'host' | undefined;
+  const nameTokens: string[] = [];
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === '--help' || token === '-h') {
+      help = true;
+      continue;
+    }
+    if (token === '--provider') {
+      const value = tokens[i + 1]?.toLowerCase();
+      if (!value) return { help, error: '缺少 --provider 的值' };
+      if (value !== 'claude' && value !== 'openai') {
+        return { help, error: 'Provider 仅支持 claude 或 openai' };
+      }
+      llmProvider = value;
+      i += 1;
+      continue;
+    }
+    if (token === '--mode') {
+      const value = tokens[i + 1]?.toLowerCase();
+      if (!value) return { help, error: '缺少 --mode 的值' };
+      if (value !== 'container' && value !== 'host') {
+        return { help, error: '模式仅支持 container 或 host' };
+      }
+      executionMode = value;
+      i += 1;
+      continue;
+    }
+    if (token === '--workspace') {
+      const value = tokens[i + 1];
+      if (!value) return { help, error: '缺少 --workspace 的值' };
+      nameTokens.push(value);
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      return { help, error: `未知参数: ${token}` };
+    }
+    nameTokens.push(token);
+  }
+
+  return {
+    help,
+    name: nameTokens.join(' ').trim() || undefined,
+    llmProvider,
+    executionMode,
+  };
+}
+
+function formatNewCommandHelp(): string {
+  return (
+    '用法：\n' +
+    '/new <名称> [--provider claude|openai] [--mode container|host]\n' +
+    '/new --workspace <名称> [--provider claude|openai] [--mode container|host]\n\n' +
+    '示例：\n' +
+    '/new 客服工作台 --provider openai --mode host\n' +
+    '/new --workspace Debug Sandbox --provider claude --mode container\n\n' +
+    '说明：\n' +
+    '- 名称为工作区名称，支持用引号包裹空格\n' +
+    '- --provider 可选，默认跟随系统默认 Provider\n' +
+    '- --mode 可选，默认自动选择（有 Docker 时 container，否则 host）'
+  );
 }
 
 async function handleClearCommand(chatJid: string): Promise<string> {
@@ -1373,29 +1480,42 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
 
 async function handleNewCommand(
   chatJid: string,
-  rawName: string,
+  rawArgs: string,
 ): Promise<string> {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '当前 IM 未绑定工作区';
   const userId = group.created_by;
   if (!userId) return '无法确定当前聊天所属用户';
 
-  const name = rawName.trim();
-  if (!name) return '用法: /new <工作区名称>';
+  const parsed = parseNewCommandArgs(rawArgs);
+  if (parsed.help) return formatNewCommandHelp();
+  if (parsed.error) return `${parsed.error}\n\n${formatNewCommandHelp()}`;
+
+  const name = parsed.name?.trim();
+  if (!name) return formatNewCommandHelp();
   if (name.length > 50) return '名称过长（最多 50 字符）';
+
+  const owner = getUserById(userId);
+  if (parsed.executionMode === 'host' && owner?.role !== 'admin') {
+    return '仅管理员可以通过 /new 创建宿主机模式工作区';
+  }
 
   // Create a new workspace (same pattern as routes/groups.ts POST)
   const newJid = `web:${crypto.randomUUID()}`;
   const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();
+  const defaultLlmBinding = getDefaultLlmBinding();
+  const executionMode =
+    parsed.executionMode ?? ((await isDockerAvailable()) ? 'container' : 'host');
 
   const newGroup: RegisteredGroup = {
     name,
     folder,
     added_at: now,
-    executionMode: (await isDockerAvailable()) ? 'container' : 'host',
+    executionMode,
     created_by: userId,
-    ...getDefaultLlmBinding(),
+    ...defaultLlmBinding,
+    llm_provider: parsed.llmProvider ?? defaultLlmBinding.llm_provider,
   };
 
   // Register the workspace
@@ -6292,9 +6412,10 @@ function buildTelegramBotAddedHandler(
     onNewChat(chatJid, chatName);
     const welcome =
       `已加入「${chatName}」！当前绑定到默认工作区。\n\n` +
-      `/new <名称> — 新建工作区并绑定此群\n` +
+      `/new <名称> [--provider openai] [--mode host] — 新建工作区并绑定此群\n` +
       `/bind <工作区> — 绑定到已有工作区\n` +
-      `/list — 查看所有工作区\n\n` +
+      `/list — 查看所有工作区\n` +
+      `/help — 查看完整指令说明\n\n` +
       `也可以直接发消息，我会在默认工作区回复。`;
     imManager
       .sendMessage(chatJid, welcome)

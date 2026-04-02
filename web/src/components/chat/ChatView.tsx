@@ -7,9 +7,15 @@ import { MessageInput } from './MessageInput';
 import { FilePanel } from './FilePanel';
 import { ContainerEnvPanel } from './ContainerEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { PromptDialog } from '@/components/common/PromptDialog';
-import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Sun, Terminal, Users, Variable, X } from 'lucide-react';
+import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Settings2, Sun, Terminal, Users, Variable, X } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useTheme } from '../../hooks/useTheme';
 import { cn } from '@/lib/utils';
@@ -23,6 +29,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { AgentTabBar } from './AgentTabBar';
 import { ImBindingDialog } from './ImBindingDialog';
 import { showToast } from '../../utils/toast';
+import { GroupDetail } from '../groups/GroupDetail';
 
 /** Sentinel value for binding the main conversation (vs. a specific agent) */
 const MAIN_BINDING = '__main__' as const;
@@ -66,6 +73,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const [terminalHeight, setTerminalHeight] = useState(TERMINAL_DEFAULT_HEIGHT);
   const [mobileTerminal, setMobileTerminal] = useState(false);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
+  const [workspaceSettingsOpen, setWorkspaceSettingsOpen] = useState(false);
   // null = dialog closed; MAIN_BINDING = main conversation; other = agent id
   const [bindingAgentId, setBindingAgentId] = useState<string | null>(null);
   const [showNewConversation, setShowNewConversation] = useState(false);
@@ -488,6 +496,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         >
           {panelOpen ? <PanelRightClose className="w-5 h-5" /> : <PanelRightOpen className="w-5 h-5" />}
         </button>
+        <button
+          onClick={() => setWorkspaceSettingsOpen(true)}
+          className="hidden lg:flex p-2 rounded-lg hover:bg-accent text-muted-foreground transition-colors cursor-pointer"
+          title="工作区设置"
+          aria-label="工作区设置"
+        >
+          <Settings2 className="w-5 h-5" />
+        </button>
         {/* Mobile only: condensed actions */}
         <div className="lg:hidden">
           <button
@@ -781,6 +797,15 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </SheetHeader>
           <div className="space-y-2 pt-2">
             <button
+              onClick={() => {
+                setMobileActionsOpen(false);
+                setWorkspaceSettingsOpen(true);
+              }}
+              className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
+            >
+              工作区设置
+            </button>
+            <button
               onClick={openMobileFiles}
               className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
             >
@@ -877,6 +902,15 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         }}
         onClose={() => setRenameTarget(null)}
       />
+
+      <Dialog open={workspaceSettingsOpen} onOpenChange={setWorkspaceSettingsOpen}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto p-0">
+          <DialogHeader className="px-6 pt-6 pb-2">
+            <DialogTitle>工作区设置</DialogTitle>
+          </DialogHeader>
+          <GroupDetail group={{ ...group, jid: groupJid }} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
