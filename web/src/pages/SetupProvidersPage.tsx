@@ -131,7 +131,7 @@ export function SetupProvidersPage() {
       setOauthState(null);
       setOauthCode('');
       setOauthDone(true);
-      setNotice('Claude OAuth 登录成功，token 已保存。');
+      setNotice('Anthropic OAuth 登录成功，凭据已保存。');
     } catch (err) {
       setError(getErrorMessage(err, 'OAuth 授权码换取失败'));
     } finally {
@@ -184,7 +184,7 @@ export function SetupProvidersPage() {
         } else if (apiKey.trim()) {
           // API Key mode — create official provider
           await api.post('/api/config/claude/providers', {
-            name: '官方 Claude (API Key)',
+            name: 'Anthropic 官方 (API Key)',
             type: 'official',
             anthropicApiKey: apiKey.trim(),
             enabled: true,
@@ -200,7 +200,7 @@ export function SetupProvidersPage() {
               if (oauth?.accessToken && oauth?.refreshToken) {
                 created = true;
                 await api.post('/api/config/claude/providers', {
-                  name: '官方 Claude (OAuth)',
+                  name: 'Anthropic 官方 (OAuth)',
                   type: 'official',
                   claudeOAuthCredentials: {
                     accessToken: oauth.accessToken,
@@ -220,7 +220,7 @@ export function SetupProvidersPage() {
 
           if (!created) {
             await api.post('/api/config/claude/providers', {
-              name: '官方 Claude (Setup Token)',
+              name: 'Anthropic 官方 (Setup Token)',
               type: 'official',
               claudeCodeOauthToken: trimmed,
               enabled: true,
@@ -323,7 +323,7 @@ export function SetupProvidersPage() {
             <h2 className="text-base font-semibold text-foreground">Anthropic Provider 初始化</h2>
           </div>
           <p className="text-xs text-muted-foreground mb-4">
-            这里用于快速初始化系统默认的 Anthropic 渠道。如果你只使用 Codex，可以跳过这一段，直接在下方配置 OpenAI / Codex Provider。
+            这里用于快速初始化系统默认的 Anthropic 通道。如果你默认使用 OpenAI / Codex 体系，可以跳过这一段，直接在下方配置对应 Provider。
           </p>
 
           <div className="inline-flex rounded-lg border border-border p-1 bg-muted mb-4">
@@ -384,9 +384,9 @@ export function SetupProvidersPage() {
                 <>
                   {/* OAuth one-click login */}
                   <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-3">
-                    <div className="text-sm font-medium text-foreground">一键登录 Claude（推荐）</div>
+                    <div className="text-sm font-medium text-foreground">一键登录 Anthropic（推荐）</div>
                     <div className="text-xs text-muted-foreground">
-                      点击按钮后会打开 claude.ai 授权页面，完成授权后将页面上显示的授权码粘贴回来。
+                      点击按钮后会打开 Anthropic 授权页面，完成授权后将页面上显示的授权码粘贴回来。
                     </div>
 
                     {oauthDone ? (
@@ -396,12 +396,12 @@ export function SetupProvidersPage() {
                     ) : !oauthState ? (
                       <Button onClick={handleOAuthStart} disabled={oauthLoading || saving}>
                         {oauthLoading ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
-                        一键登录 Claude
+                        一键登录 Anthropic
                       </Button>
                     ) : (
                       <div className="space-y-2">
                         <div className="text-xs bg-warning-bg border border-warning/30 text-warning rounded-md px-3 py-2">
-                          授权窗口已打开，请在 claude.ai 完成授权后，将页面上显示的授权码粘贴到下方。
+                          授权窗口已打开，请在授权页面完成登录后，将页面上显示的授权码粘贴到下方。
                         </div>
                         <div className="flex gap-2">
                           <Input
@@ -431,7 +431,7 @@ export function SetupProvidersPage() {
                   <div className="rounded-lg border border-border bg-muted p-3 text-sm text-foreground">
                     <div className="font-medium mb-2">获取凭据</div>
                     <ol className="list-decimal ml-5 space-y-1 text-xs text-muted-foreground">
-                      <li>在目标机器安装 Claude Code CLI（若未安装）。</li>
+                      <li>在目标机器安装 Anthropic CLI 运行时（若未安装）。</li>
                       <li>在终端执行 <code>claude login</code> 完成账号登录。</li>
                       <li>
                         方式 A：执行 <code>cat ~/.claude/.credentials.json</code>，复制完整 JSON 内容到下方（推荐）。
@@ -492,7 +492,7 @@ export function SetupProvidersPage() {
                       className="font-mono"
                     />
                     <p className="text-xs text-muted-foreground mt-1">
-                      直接使用 Anthropic 官方 API Key 调用 Claude
+                      直接使用 Anthropic 官方 API Key 调用默认运行时
                     </p>
                   </div>
                 </>
@@ -594,10 +594,10 @@ export function SetupProvidersPage() {
         <section className="bg-card rounded-xl border border-border shadow-sm p-5">
           <div className="flex items-center gap-2 mb-3">
             <ShieldCheck className="w-4 h-4 text-primary" />
-            <h2 className="text-base font-semibold text-foreground">OpenAI / Codex Provider 初始化</h2>
+            <h2 className="text-base font-semibold text-foreground">OpenAI Provider 初始化</h2>
           </div>
           <p className="text-xs text-muted-foreground mb-4">
-            如果默认运行时使用 Codex，请直接在这里完成 CLI 或 API Key 配置。保存成功后，点击页面底部的“刷新接入状态”即可进入后台。
+            如果默认运行时使用 OpenAI / Codex 体系，请直接在这里完成 CLI 或 API Key 配置。保存成功后，点击页面底部的“刷新接入状态”即可进入后台。
           </p>
           <CodexProviderSection setNotice={setNotice} setError={setError} />
         </section>

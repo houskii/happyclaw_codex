@@ -49,7 +49,7 @@ export function SystemInfo({ status }: SystemInfoProps) {
     return `${minutes}m`;
   };
 
-  const versions = status.claudeCodeVersions;
+  const versions = status.agentRuntimeVersions ?? status.claudeCodeVersions;
 
   return (
     <Card>
@@ -76,7 +76,7 @@ export function SystemInfo({ status }: SystemInfoProps) {
           <>
             {versions?.latest && (
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">最新执行引擎版本</span>
+                <span className="text-muted-foreground">最新 Agent Runtime 版本</span>
                 <span className="text-foreground font-medium font-mono text-xs">
                   {versions.latest}
                 </span>

@@ -47,6 +47,7 @@ function checkCooldown(userId: string, map: Map<string, number> = cooldowns, coo
 let capCache: {
   ghAvailable: boolean;
   ghUsername: string | null;
+  providerAvailable: boolean;
   claudeAvailable: boolean;
   checkedAt: number;
 } | null = null;
@@ -55,12 +56,14 @@ const CAP_CACHE_TTL = 5 * 60 * 1000;
 async function checkCapabilities(): Promise<{
   ghAvailable: boolean;
   ghUsername: string | null;
+  providerAvailable: boolean;
   claudeAvailable: boolean;
 }> {
   if (capCache && Date.now() - capCache.checkedAt < CAP_CACHE_TTL) {
     return {
       ghAvailable: capCache.ghAvailable,
       ghUsername: capCache.ghUsername,
+      providerAvailable: capCache.providerAvailable,
       claudeAvailable: capCache.claudeAvailable,
     };
   }
@@ -70,9 +73,13 @@ async function checkCapabilities(): Promise<{
       .then(() => true)
       .catch(() => false),
   ]);
-  // Claude availability is determined by provider config, not CLI presence
+  // Provider availability is determined by the configured default runtime channel.
   const providerConfig = getClaudeProviderConfig();
-  const claude = !!(providerConfig.anthropicApiKey || providerConfig.claudeCodeOauthToken || providerConfig.claudeOAuthCredentials);
+  const providerAvailable = !!(
+    providerConfig.anthropicApiKey ||
+    providerConfig.claudeCodeOauthToken ||
+    providerConfig.claudeOAuthCredentials
+  );
 
   // Get gh username if available
   let ghUsername: string | null = null;
@@ -85,8 +92,19 @@ async function checkCapabilities(): Promise<{
     }
   }
 
-  capCache = { ghAvailable: gh, ghUsername, claudeAvailable: claude, checkedAt: Date.now() };
-  return { ghAvailable: gh, ghUsername, claudeAvailable: claude };
+  capCache = {
+    ghAvailable: gh,
+    ghUsername,
+    providerAvailable,
+    claudeAvailable: providerAvailable,
+    checkedAt: Date.now(),
+  };
+  return {
+    ghAvailable: gh,
+    ghUsername,
+    providerAvailable,
+    claudeAvailable: providerAvailable,
+  };
 }
 
 // --- Helpers ---
@@ -330,10 +348,10 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
   const rawLogs = readRecentLogs(folder);
   const logs = sanitizeLogs(rawLogs);
 
-  // Try Claude analysis
+  // Try provider-assisted analysis
   const caps = await checkCapabilities();
-  if (!caps.claudeAvailable) {
-    logger.info('bug-report: claude CLI not available, using fallback template');
+  if (!caps.providerAvailable) {
+    logger.info('bug-report: provider unavailable, using fallback template');
     const fallback = buildFallbackReport(description, systemInfo, logs);
     return c.json({ ...fallback, systemInfo });
   }
@@ -343,7 +361,7 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
   try {
     logger.info(
       { promptLen: prompt.length, userId: user.id },
-      'bug-report: invoking Claude SDK',
+      'bug-report: invoking provider SDK',
     );
 
     const model = process.env.RECALL_MODEL || undefined;
@@ -354,7 +372,7 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
       return c.json({ ...fallback, systemInfo });
     }
 
-    // Try to parse Claude's JSON output
+    // Try to parse model JSON output
     const parsed = tryParseJsonOutput(result);
     if (parsed?.body) {
       return c.json({

@@ -28,6 +28,7 @@ interface BugReportDialogProps {
 interface Capabilities {
   ghAvailable: boolean;
   ghUsername: string | null;
+  providerAvailable?: boolean;
   claudeAvailable: boolean;
 }
 
@@ -48,6 +49,7 @@ const MAX_SCREENSHOT_SIZE = 5 * 1024 * 1024; // 5MB
 export function BugReportDialog({ open, onClose }: BugReportDialogProps) {
   // Capabilities (pre-fetched on open)
   const [caps, setCaps] = useState<Capabilities | null>(null);
+  const providerAnalysisAvailable = caps?.providerAvailable ?? caps?.claudeAvailable ?? false;
 
   // Step 1: Input
   const [description, setDescription] = useState('');
@@ -72,7 +74,7 @@ export function BugReportDialog({ open, onClose }: BugReportDialogProps) {
   useEffect(() => {
     if (open) {
       api.get<Capabilities>('/api/bug-report/capabilities').then(setCaps).catch(() => {
-        setCaps({ ghAvailable: false, ghUsername: null, claudeAvailable: false });
+        setCaps({ ghAvailable: false, ghUsername: null, providerAvailable: false, claudeAvailable: false });
       });
     }
   }, [open]);
@@ -163,7 +165,7 @@ export function BugReportDialog({ open, onClose }: BugReportDialogProps) {
     setScreenshots((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  // --- Generate report (Claude analysis) ---
+  // --- Generate report (provider-assisted analysis) ---
 
   const generateReport = useCallback(async (): Promise<GenerateResult | null> => {
     try {
@@ -368,6 +370,11 @@ export function BugReportDialog({ open, onClose }: BugReportDialogProps) {
               <p className="text-xs text-muted-foreground mt-1">
                 支持粘贴截图或点击添加，单张不超过 5MB
               </p>
+              {!providerAnalysisAvailable && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  当前没有可用的默认 Provider，将使用基础模板生成 Issue 草稿。
+                </p>
+              )}
               <input
                 ref={fileInputRef}
                 type="file"

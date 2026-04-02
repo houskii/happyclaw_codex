@@ -45,13 +45,13 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
   // 健康轮询标记
   const healthTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Claude 服务状态
+  // Anthropic 服务状态
   const [claudeStatus, setClaudeStatus] = useState<{
     indicator: string;
     components: { name: string; status: string }[];
   } | null>(null);
 
-  // ─── Claude 服务状态轮询 ───────────────────────────────────────
+  // ─── Anthropic 服务状态轮询 ─────────────────────────────────────
   useEffect(() => {
     const fetchStatus = async () => {
       try {

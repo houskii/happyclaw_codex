@@ -20,7 +20,7 @@ import { logger } from '../logger.js';
 
 const execFileAsync = promisify(execFile);
 
-// --- Claude Code version cache ---
+// --- Agent runtime version cache ---
 
 interface VersionInfo {
   host: string | null;
@@ -40,8 +40,8 @@ let cachedLatestVersion: { version: string | null; fetchedAt: number } | null =
   null;
 const LATEST_VERSION_CACHE_TTL = 30 * 60 * 1000; // 30min
 
-/** Query latest Claude Code version from npm registry */
-async function getLatestClaudeCodeVersion(): Promise<string | null> {
+/** Query latest agent runtime SDK version from npm registry */
+async function getLatestAgentRuntimeVersion(): Promise<string | null> {
   const now = Date.now();
   if (
     cachedLatestVersion &&
@@ -67,8 +67,8 @@ async function getLatestClaudeCodeVersion(): Promise<string | null> {
   }
 }
 
-/** Get host Claude Code version by running SDK's built-in cli.js --version */
-async function getHostClaudeCodeVersion(): Promise<string | null> {
+/** Get host agent runtime version by running SDK's built-in cli.js --version */
+async function getHostAgentRuntimeVersion(): Promise<string | null> {
   try {
     const cliPath = path.resolve(
       process.cwd(),
@@ -98,8 +98,8 @@ async function getDockerImageId(): Promise<string | null> {
   }
 }
 
-/** Get container Claude Code version from SDK's cli.js inside Docker image */
-async function getContainerClaudeCodeVersion(): Promise<string | null> {
+/** Get container agent runtime version from SDK's cli.js inside Docker image */
+async function getContainerAgentRuntimeVersion(): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
       'docker',
@@ -116,7 +116,7 @@ async function getContainerClaudeCodeVersion(): Promise<string | null> {
   }
 }
 
-async function getClaudeCodeVersions(): Promise<VersionInfo> {
+async function getAgentRuntimeVersions(): Promise<VersionInfo> {
   const now = Date.now();
   const imageId = await getDockerImageId();
 
@@ -131,9 +131,9 @@ async function getClaudeCodeVersions(): Promise<VersionInfo> {
 
   // Fetch all versions concurrently
   const [host, container, latest] = await Promise.all([
-    getHostClaudeCodeVersion(),
-    imageId ? getContainerClaudeCodeVersion() : Promise.resolve(null),
-    getLatestClaudeCodeVersion(),
+    getHostAgentRuntimeVersion(),
+    imageId ? getContainerAgentRuntimeVersion() : Promise.resolve(null),
+    getLatestAgentRuntimeVersion(),
   ]);
   const info: VersionInfo = { host, container, latest };
 
@@ -268,6 +268,8 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     }).length;
   }
 
+  const runtimeVersions = isAdmin ? await getAgentRuntimeVersions() : undefined;
+
   return c.json({
     activeContainers,
     activeHostProcesses: isAdmin
@@ -283,7 +285,8 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     groups: filteredGroups,
     dockerImageExists,
     dockerBuildInProgress: buildState.building,
-    claudeCodeVersions: isAdmin ? await getClaudeCodeVersions() : undefined,
+    agentRuntimeVersions: runtimeVersions,
+    claudeCodeVersions: runtimeVersions,
     dockerBuildLogs:
       isAdmin && buildState.building ? buildState.logs.slice(-50) : undefined,
     dockerBuildResult: isAdmin ? buildState.result : undefined,

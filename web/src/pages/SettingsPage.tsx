@@ -105,8 +105,8 @@ export function SettingsPage() {
 
   const sectionTitle: Record<SettingsTab, string> = {
     providers: 'Provider 管理',
-    claude: 'Anthropic Provider',
-    codex: 'OpenAI / Codex Provider',
+    claude: 'Anthropic 通道',
+    codex: 'OpenAI 通道',
     registration: '注册管理',
     appearance: '全局外观',
     system: '系统参数',
