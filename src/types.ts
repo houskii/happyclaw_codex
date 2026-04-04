@@ -34,6 +34,8 @@ export interface ContainerConfig {
 }
 
 export type ExecutionMode = 'container' | 'host';
+export type WorkspaceLlmProvider = 'claude' | 'openai';
+export type ThinkingEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface RegisteredGroup {
   name: string;
@@ -53,9 +55,13 @@ export interface RegisteredGroup {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled'; // 消息门控模式（默认 'auto'，兼容 require_mention）
   mcp_mode?: 'inherit' | 'custom'; // MCP 配置模式（默认 'inherit' 继承用户配置）
   selected_mcps?: string[] | null; // custom 模式下选中的 MCP server IDs
-  llm_provider?: 'claude' | 'openai'; // LLM 提供商（默认 'claude'）
-  model?: string; // 模型标识符覆盖（如 'opus', 'sonnet', 'haiku'），空=使用全局配置
-  thinking_effort?: 'low' | 'medium' | 'high'; // Thinking effort 级别（默认 null=provider 默认）
+  llm_provider?: WorkspaceLlmProvider; // 当前生效的 LLM 提供商（默认 'claude'）
+  claude_model?: string; // Claude provider 的模型覆盖
+  claude_thinking_effort?: ThinkingEffort; // Claude provider 的推理强度
+  codex_model?: string; // Codex/OpenAI provider 的模型覆盖
+  codex_thinking_effort?: ThinkingEffort; // Codex/OpenAI provider 的推理强度
+  model?: string; // 当前 provider 的生效模型（兼容旧字段）
+  thinking_effort?: ThinkingEffort; // 当前 provider 的生效推理强度（兼容旧字段）
   context_compression?: string; // 上下文压缩模式（默认 'off'）
   knowledge_extraction?: boolean; // 是否启用知识提取（默认 false）
 }

@@ -18,8 +18,12 @@ export interface GroupInfo {
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   llm_provider?: 'claude' | 'openai';
+  claude_model?: string | null;
+  claude_thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
+  codex_model?: string | null;
+  codex_thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
   model?: string;
-  thinking_effort?: 'low' | 'medium' | 'high' | null;
+  thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
   context_compression?: string;
   knowledge_extraction?: boolean;
 }

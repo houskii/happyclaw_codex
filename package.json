@@ -7,8 +7,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
-    "dev:bun": "bun src/index.ts",
+    "dev": "HAPPYCLAW_WEB_DEV_PROXY_TARGET=http://127.0.0.1:5173 tsx src/index.ts",
+    "dev:bun": "HAPPYCLAW_WEB_DEV_PROXY_TARGET=http://127.0.0.1:5173 bun src/index.ts",
     "reset:admin": "tsx src/reset-admin.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",

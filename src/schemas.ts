@@ -118,7 +118,7 @@ export const MessageCreateSchema = z
   });
 
 const WorkspaceLlmProviderSchema = z.enum(['claude', 'openai']);
-const ThinkingEffortSchema = z.enum(['low', 'medium', 'high']);
+const ThinkingEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh']);
 const TrimmedOptionalString = z
   .string()
   .optional()
@@ -145,6 +145,10 @@ export const GroupCreateSchema = z.object({
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
   llm_provider: WorkspaceLlmProviderSchema.optional(),
+  claude_model: TrimmedOptionalString,
+  claude_thinking_effort: ThinkingEffortSchema.optional(),
+  codex_model: TrimmedOptionalString,
+  codex_thinking_effort: ThinkingEffortSchema.optional(),
   model: TrimmedOptionalString,
   thinking_effort: ThinkingEffortSchema.optional(),
   context_compression: TrimmedOptionalString,
@@ -217,6 +221,10 @@ export const GroupPatchSchema = z.object({
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
   llm_provider: WorkspaceLlmProviderSchema.optional(),
+  claude_model: TrimmedNullableString,
+  claude_thinking_effort: ThinkingEffortSchema.nullable().optional(),
+  codex_model: TrimmedNullableString,
+  codex_thinking_effort: ThinkingEffortSchema.nullable().optional(),
   model: TrimmedNullableString,
   thinking_effort: ThinkingEffortSchema.nullable().optional(),
   context_compression: TrimmedNullableString,
@@ -283,6 +291,7 @@ export const SystemSettingsSchema = z.object({
     .optional(),
   maxConcurrentContainers: z.number().int().min(1).max(100).optional(),
   maxConcurrentHostProcesses: z.number().int().min(1).max(50).optional(),
+  defaultWorkspaceExecutionMode: z.enum(['host', 'container']).optional(),
   maxLoginAttempts: z.number().int().min(1).max(100).optional(),
   loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
   maxConcurrentScripts: z.number().int().min(1).max(50).optional(),
@@ -307,8 +316,12 @@ export const SystemSettingsSchema = z.object({
   defaultLlmProvider: z.enum(['claude', 'openai']).optional(),
   defaultClaudeModel: z.string().max(100).optional(),
   defaultCodexModel: z.string().max(100).optional(),
+  defaultClaudeThinkingEffort: ThinkingEffortSchema.or(z.literal('')).optional(),
+  defaultCodexThinkingEffort: ThinkingEffortSchema.or(z.literal('')).optional(),
   defaultAnthropicModel: z.string().max(100).optional(),
   defaultOpenaiModel: z.string().max(100).optional(),
+  defaultAnthropicThinkingEffort: ThinkingEffortSchema.or(z.literal('')).optional(),
+  defaultOpenaiThinkingEffort: ThinkingEffortSchema.or(z.literal('')).optional(),
   claudeUsageApiUrl: z.string().max(2000).optional(),
   codexUsageApiUrl: z.string().max(2000).optional(),
   anthropicUsageApiUrl: z.string().max(2000).optional(),

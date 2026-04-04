@@ -139,9 +139,16 @@ export function SystemSettingsSection() {
   const [billingCurrency, setBillingCurrency] = useState('USD');
   const [billingCurrencyRate, setBillingCurrencyRate] = useState(1);
   const [webPublicUrl, setWebPublicUrl] = useState('');
+  const [defaultWorkspaceExecutionMode, setDefaultWorkspaceExecutionMode] = useState<'host' | 'container'>('container');
   const [defaultLlmProvider, setDefaultLlmProvider] = useState<'claude' | 'openai'>('claude');
   const [defaultAnthropicModel, setDefaultAnthropicModel] = useState('');
   const [defaultOpenaiModel, setDefaultOpenaiModel] = useState('');
+  const [defaultAnthropicThinkingEffort, setDefaultAnthropicThinkingEffort] = useState<
+    'low' | 'medium' | 'high' | 'xhigh' | ''
+  >('');
+  const [defaultOpenaiThinkingEffort, setDefaultOpenaiThinkingEffort] = useState<
+    'low' | 'medium' | 'high' | 'xhigh' | ''
+  >('');
   const [anthropicUsageApiUrl, setAnthropicUsageApiUrl] = useState('');
   const [openaiUsageApiUrl, setOpenaiUsageApiUrl] = useState('');
   const [anthropicSdkBaseUrl, setAnthropicSdkBaseUrl] = useState('');
@@ -177,9 +184,16 @@ export function SystemSettingsSection() {
         setBillingCurrency(data.billingCurrency ?? 'USD');
         setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
         setWebPublicUrl(data.webPublicUrl ?? '');
+        setDefaultWorkspaceExecutionMode(data.defaultWorkspaceExecutionMode ?? 'container');
         setDefaultLlmProvider(data.defaultLlmProvider ?? 'claude');
         setDefaultAnthropicModel(data.defaultAnthropicModel ?? data.defaultClaudeModel ?? '');
         setDefaultOpenaiModel(data.defaultOpenaiModel ?? data.defaultCodexModel ?? '');
+        setDefaultAnthropicThinkingEffort(
+          data.defaultAnthropicThinkingEffort ?? data.defaultClaudeThinkingEffort ?? '',
+        );
+        setDefaultOpenaiThinkingEffort(
+          data.defaultOpenaiThinkingEffort ?? data.defaultCodexThinkingEffort ?? '',
+        );
         setAnthropicUsageApiUrl(data.anthropicUsageApiUrl ?? data.claudeUsageApiUrl ?? '');
         setOpenaiUsageApiUrl(data.openaiUsageApiUrl ?? data.codexUsageApiUrl ?? '');
         setAnthropicSdkBaseUrl(data.anthropicSdkBaseUrl ?? data.claudeSdkBaseUrl ?? '');
@@ -231,9 +245,12 @@ export function SystemSettingsSection() {
         billingCurrency,
         billingCurrencyRate,
         webPublicUrl,
+        defaultWorkspaceExecutionMode,
         defaultLlmProvider,
         defaultAnthropicModel,
         defaultOpenaiModel,
+        defaultAnthropicThinkingEffort,
+        defaultOpenaiThinkingEffort,
         anthropicUsageApiUrl,
         openaiUsageApiUrl,
         anthropicSdkBaseUrl,
@@ -258,9 +275,16 @@ export function SystemSettingsSection() {
       setBillingCurrency(data.billingCurrency ?? 'USD');
       setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
       setWebPublicUrl(data.webPublicUrl ?? '');
+      setDefaultWorkspaceExecutionMode(data.defaultWorkspaceExecutionMode ?? 'container');
       setDefaultLlmProvider(data.defaultLlmProvider ?? 'claude');
       setDefaultAnthropicModel(data.defaultAnthropicModel ?? data.defaultClaudeModel ?? '');
       setDefaultOpenaiModel(data.defaultOpenaiModel ?? data.defaultCodexModel ?? '');
+      setDefaultAnthropicThinkingEffort(
+        data.defaultAnthropicThinkingEffort ?? data.defaultClaudeThinkingEffort ?? '',
+      );
+      setDefaultOpenaiThinkingEffort(
+        data.defaultOpenaiThinkingEffort ?? data.defaultCodexThinkingEffort ?? '',
+      );
       setAnthropicUsageApiUrl(data.anthropicUsageApiUrl ?? data.claudeUsageApiUrl ?? '');
       setOpenaiUsageApiUrl(data.openaiUsageApiUrl ?? data.codexUsageApiUrl ?? '');
       setAnthropicSdkBaseUrl(data.anthropicSdkBaseUrl ?? data.claudeSdkBaseUrl ?? '');
@@ -474,6 +498,26 @@ export function SystemSettingsSection() {
             用于飞书卡片按钮跳转等场景。留空则不生成跳转链接。
           </p>
         </div>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
+            新工作区默认执行模式
+          </label>
+          <select
+            value={defaultWorkspaceExecutionMode}
+            onChange={(e) =>
+              setDefaultWorkspaceExecutionMode(
+                e.target.value === 'host' ? 'host' : 'container',
+              )
+            }
+            className="max-w-md w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            <option value="container">Docker / Container</option>
+            <option value="host">Host</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            影响 Web、新建命令和 IM 自动创建工作区的默认模式。成员用户遇到 host 默认值时会自动降级到 container。
+          </p>
+        </div>
       </div>
 
       {/* 全局模型默认值 */}
@@ -518,6 +562,29 @@ export function SystemSettingsSection() {
         </div>
         <div>
           <label className="block text-sm font-medium text-foreground mb-1">
+            Anthropic 默认推理强度
+          </label>
+          <select
+            value={defaultAnthropicThinkingEffort}
+            onChange={(e) =>
+              setDefaultAnthropicThinkingEffort(
+                e.target.value as 'low' | 'medium' | 'high' | 'xhigh' | '',
+              )
+            }
+            className="max-w-md w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            <option value="">跟随模型默认</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="xhigh">超高</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            留空时由 Claude Code / 模型自身决定推理强度。
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
             OpenAI 默认模型
           </label>
           <Input
@@ -529,6 +596,29 @@ export function SystemSettingsSection() {
           />
           <p className="text-xs text-muted-foreground mt-1">
             留空则使用 OpenAI / Codex 配置中的默认模型，最终由当前激活的配置与 Provider 决定。
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-1">
+            OpenAI 默认推理强度
+          </label>
+          <select
+            value={defaultOpenaiThinkingEffort}
+            onChange={(e) =>
+              setDefaultOpenaiThinkingEffort(
+                e.target.value as 'low' | 'medium' | 'high' | 'xhigh' | '',
+              )
+            }
+            className="max-w-md w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            <option value="">跟随模型默认</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="xhigh">超高</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            留空时由 Codex / GPT 模型默认值决定推理强度。
           </p>
         </div>
       </div>

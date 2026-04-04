@@ -98,6 +98,7 @@ export interface SystemSettings {
   containerMaxOutputSize: number;
   maxConcurrentContainers: number;
   maxConcurrentHostProcesses: number;
+  defaultWorkspaceExecutionMode: 'host' | 'container';
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   maxConcurrentScripts: number;
@@ -119,6 +120,8 @@ export interface SystemSettings {
   defaultLlmProvider: 'claude' | 'openai';
   defaultAnthropicModel: string;
   defaultOpenaiModel: string;
+  defaultAnthropicThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
+  defaultOpenaiThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
   anthropicUsageApiUrl: string;
   openaiUsageApiUrl: string;
   anthropicSdkBaseUrl: string;
@@ -127,6 +130,8 @@ export interface SystemSettings {
   dockerInjectedHostEnvKeys: string[];
   defaultClaudeModel?: string;
   defaultCodexModel?: string;
+  defaultClaudeThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
+  defaultCodexThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
   claudeUsageApiUrl?: string;
   codexUsageApiUrl?: string;
   claudeSdkBaseUrl?: string;

@@ -81,7 +81,13 @@ export class CodexSession {
       webSearchMode: 'live',
       skipGitRepoCheck: true,
       ...(this.config.thinkingEffort
-        ? { modelReasoningEffort: this.config.thinkingEffort as 'low' | 'medium' | 'high' }
+        ? {
+            modelReasoningEffort: this.config.thinkingEffort as
+              | 'low'
+              | 'medium'
+              | 'high'
+              | 'xhigh',
+          }
         : {}),
     };
 

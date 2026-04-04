@@ -10,8 +10,12 @@ export type { GroupInfo, AgentInfo };
 
 export interface FlowRuntimeSettings {
   llm_provider?: 'claude' | 'openai';
+  claude_model?: string | null;
+  claude_thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
+  codex_model?: string | null;
+  codex_thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
   model?: string;
-  thinking_effort?: 'low' | 'medium' | 'high' | null;
+  thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
   context_compression?: string;
   knowledge_extraction?: boolean;
 }
@@ -1179,6 +1183,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (options?.init_source_path) body.init_source_path = options.init_source_path;
       if (options?.init_git_url) body.init_git_url = options.init_git_url;
       if (options?.llm_provider) body.llm_provider = options.llm_provider;
+      if (options?.claude_model !== undefined) body.claude_model = options.claude_model?.trim() || null;
+      if (options?.claude_thinking_effort !== undefined) body.claude_thinking_effort = options.claude_thinking_effort;
+      if (options?.codex_model !== undefined) body.codex_model = options.codex_model?.trim() || null;
+      if (options?.codex_thinking_effort !== undefined) body.codex_thinking_effort = options.codex_thinking_effort;
       if (options?.model?.trim()) body.model = options.model.trim();
       if (options?.thinking_effort) body.thinking_effort = options.thinking_effort;
       if (options?.context_compression?.trim()) body.context_compression = options.context_compression.trim();
@@ -1230,6 +1238,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const body: Record<string, string | boolean | null> = {};
       if (updates.llm_provider) body.llm_provider = updates.llm_provider;
+      if (updates.claude_model !== undefined) body.claude_model = updates.claude_model?.trim() || null;
+      if (updates.claude_thinking_effort !== undefined) body.claude_thinking_effort = updates.claude_thinking_effort;
+      if (updates.codex_model !== undefined) body.codex_model = updates.codex_model?.trim() || null;
+      if (updates.codex_thinking_effort !== undefined) body.codex_thinking_effort = updates.codex_thinking_effort;
       if (updates.model !== undefined) body.model = updates.model.trim() || null;
       if (updates.thinking_effort !== undefined) body.thinking_effort = updates.thinking_effort;
       if (updates.context_compression !== undefined) {

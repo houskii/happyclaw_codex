@@ -33,6 +33,7 @@ import {
   ScheduledTask,
   SubAgent,
   TaskRunLog,
+  ThinkingEffort,
   User,
   UserBalance,
   UserPublic,
@@ -673,6 +674,10 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'llm_provider', "TEXT DEFAULT 'claude'");
   ensureColumn('registered_groups', 'model', 'TEXT');
   ensureColumn('registered_groups', 'thinking_effort', 'TEXT');
+  ensureColumn('registered_groups', 'claude_model', 'TEXT');
+  ensureColumn('registered_groups', 'claude_thinking_effort', 'TEXT');
+  ensureColumn('registered_groups', 'codex_model', 'TEXT');
+  ensureColumn('registered_groups', 'codex_thinking_effort', 'TEXT');
   ensureColumn('registered_groups', 'context_compression', 'TEXT');
   ensureColumn('registered_groups', 'knowledge_extraction', 'INTEGER DEFAULT 0');
   ensureColumn('messages', 'token_usage', 'TEXT');
@@ -722,12 +727,16 @@ export function initDatabase(): void {
           llm_provider TEXT DEFAULT 'claude',
           model TEXT,
           thinking_effort TEXT,
+          claude_model TEXT,
+          claude_thinking_effort TEXT,
+          codex_model TEXT,
+          codex_thinking_effort TEXT,
           context_compression TEXT,
           knowledge_extraction INTEGER DEFAULT 0
         );
         INSERT INTO registered_groups_new
-          (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-          SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0, 'claude', NULL, NULL, NULL, 0 FROM registered_groups;
+          (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, llm_provider, model, thinking_effort, claude_model, claude_thinking_effort, codex_model, codex_thinking_effort, context_compression, knowledge_extraction)
+          SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0, 'claude', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0 FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -784,6 +793,10 @@ export function initDatabase(): void {
       'llm_provider',
       'model',
       'thinking_effort',
+      'claude_model',
+      'claude_thinking_effort',
+      'codex_model',
+      'codex_thinking_effort',
       'context_compression',
       'knowledge_extraction',
     ],
@@ -2295,6 +2308,20 @@ function parseExecutionMode(
   return 'container';
 }
 
+function parseThinkingEffort(
+  raw: string | null,
+): ThinkingEffort | undefined {
+  if (
+    raw === 'low' ||
+    raw === 'medium' ||
+    raw === 'high' ||
+    raw === 'xhigh'
+  ) {
+    return raw;
+  }
+  return undefined;
+}
+
 /** Raw row shape from registered_groups table — single source of truth for column mapping. */
 type RegisteredGroupRow = {
   jid: string;
@@ -2319,14 +2346,54 @@ type RegisteredGroupRow = {
   llm_provider: string | null;
   model: string | null;
   thinking_effort: string | null;
+  claude_model: string | null;
+  claude_thinking_effort: string | null;
+  codex_model: string | null;
+  codex_thinking_effort: string | null;
   context_compression: string | null;
   knowledge_extraction: number | null;
 };
+
+function resolveProviderSpecificSettings(row: RegisteredGroupRow): {
+  llmProvider: 'claude' | 'openai';
+  claudeModel?: string;
+  claudeThinkingEffort?: ThinkingEffort;
+  codexModel?: string;
+  codexThinkingEffort?: ThinkingEffort;
+  effectiveModel?: string;
+  effectiveThinkingEffort?: ThinkingEffort;
+} {
+  const llmProvider = row.llm_provider === 'openai' ? 'openai' : 'claude';
+  const legacyModel = row.model ?? undefined;
+  const legacyThinkingEffort = parseThinkingEffort(row.thinking_effort);
+  const claudeModel =
+    row.claude_model ?? (llmProvider === 'claude' ? legacyModel : undefined);
+  const claudeThinkingEffort =
+    parseThinkingEffort(row.claude_thinking_effort) ??
+    (llmProvider === 'claude' ? legacyThinkingEffort : undefined);
+  const codexModel =
+    row.codex_model ?? (llmProvider === 'openai' ? legacyModel : undefined);
+  const codexThinkingEffort =
+    parseThinkingEffort(row.codex_thinking_effort) ??
+    (llmProvider === 'openai' ? legacyThinkingEffort : undefined);
+
+  return {
+    llmProvider,
+    claudeModel,
+    claudeThinkingEffort,
+    codexModel,
+    codexThinkingEffort,
+    effectiveModel: llmProvider === 'openai' ? codexModel : claudeModel,
+    effectiveThinkingEffort:
+      llmProvider === 'openai' ? codexThinkingEffort : claudeThinkingEffort,
+  };
+}
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
 function parseGroupRow(
   row: RegisteredGroupRow,
 ): RegisteredGroup & { jid: string } {
+  const providerSettings = resolveProviderSpecificSettings(row);
   return {
     jid: row.jid,
     name: row.name,
@@ -2346,14 +2413,13 @@ function parseGroupRow(
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
     require_mention: row.require_mention === 1,
     activation_mode: parseActivationMode(row.activation_mode),
-    llm_provider: row.llm_provider === 'openai' ? 'openai' : 'claude',
-    model: row.model ?? undefined,
-    thinking_effort:
-      row.thinking_effort === 'low' ||
-      row.thinking_effort === 'medium' ||
-      row.thinking_effort === 'high'
-        ? row.thinking_effort
-        : undefined,
+    llm_provider: providerSettings.llmProvider,
+    claude_model: providerSettings.claudeModel,
+    claude_thinking_effort: providerSettings.claudeThinkingEffort,
+    codex_model: providerSettings.codexModel,
+    codex_thinking_effort: providerSettings.codexThinkingEffort,
+    model: providerSettings.effectiveModel,
+    thinking_effort: providerSettings.effectiveThinkingEffort,
     context_compression: row.context_compression ?? undefined,
     knowledge_extraction: row.knowledge_extraction === 1,
   };
@@ -2385,9 +2451,24 @@ export function getRegisteredGroup(
 }
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
+  const llmProvider = group.llm_provider === 'openai' ? 'openai' : 'claude';
+  const claudeModel =
+    group.claude_model ?? (llmProvider === 'claude' ? group.model : undefined);
+  const claudeThinkingEffort =
+    group.claude_thinking_effort ??
+    (llmProvider === 'claude' ? group.thinking_effort : undefined);
+  const codexModel =
+    group.codex_model ?? (llmProvider === 'openai' ? group.model : undefined);
+  const codexThinkingEffort =
+    group.codex_thinking_effort ??
+    (llmProvider === 'openai' ? group.thinking_effort : undefined);
+  const effectiveModel = llmProvider === 'openai' ? codexModel : claudeModel;
+  const effectiveThinkingEffort =
+    llmProvider === 'openai' ? codexThinkingEffort : claudeThinkingEffort;
+
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, context_compression, knowledge_extraction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, llm_provider, model, thinking_effort, claude_model, claude_thinking_effort, codex_model, codex_thinking_effort, context_compression, knowledge_extraction)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2408,9 +2489,13 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.activation_mode ?? 'auto',
     'inherit', // mcp_mode: deprecated, always inherit (user-level MCP applies globally)
     null, // selected_mcps: deprecated, always null
-    group.llm_provider ?? 'claude',
-    group.model ?? null,
-    group.thinking_effort ?? null,
+    llmProvider,
+    effectiveModel ?? null,
+    effectiveThinkingEffort ?? null,
+    claudeModel ?? null,
+    claudeThinkingEffort ?? null,
+    codexModel ?? null,
+    codexThinkingEffort ?? null,
     group.context_compression ?? null,
     group.knowledge_extraction === true ? 1 : 0,
   );

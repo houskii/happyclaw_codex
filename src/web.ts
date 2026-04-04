@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
@@ -103,6 +103,9 @@ const app = new Hono<{ Variables: Variables }>();
 const terminalManager = new TerminalManager();
 const wsTerminals = new Map<WebSocket, string>(); // ws → groupJid
 const terminalOwners = new Map<string, WebSocket>(); // groupJid → ws
+const FRONTEND_DEV_PROXY_TARGET = (
+  process.env.HAPPYCLAW_WEB_DEV_PROXY_TARGET || ''
+).trim();
 
 function normalizeTerminalSize(
   value: unknown,
@@ -123,6 +126,49 @@ function releaseTerminalOwnership(ws: WebSocket, groupJid: string): void {
   }
   if (terminalOwners.get(groupJid) === ws) {
     terminalOwners.delete(groupJid);
+  }
+}
+
+async function proxyFrontendDevRequest(
+  c: Context<{ Variables: Variables }>,
+): Promise<Response> {
+  const upstreamUrl = new URL(c.req.url);
+  const targetUrl = new URL(
+    `${upstreamUrl.pathname}${upstreamUrl.search}`,
+    FRONTEND_DEV_PROXY_TARGET,
+  );
+  const headers = new Headers(c.req.raw.headers);
+  headers.set('host', targetUrl.host);
+
+  const init: RequestInit = {
+    method: c.req.raw.method,
+    headers,
+    redirect: 'manual',
+  };
+
+  if (c.req.raw.method !== 'GET' && c.req.raw.method !== 'HEAD') {
+    init.body = await c.req.arrayBuffer();
+  }
+
+  try {
+    const upstreamResponse = await fetch(targetUrl, init);
+    return new Response(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      statusText: upstreamResponse.statusText,
+      headers: upstreamResponse.headers,
+    });
+  } catch (error) {
+    logger.warn(
+      {
+        err: error,
+        targetUrl: targetUrl.toString(),
+      },
+      'frontend dev proxy request failed',
+    );
+    return c.text(
+      `Frontend dev server unavailable: ${FRONTEND_DEV_PROXY_TARGET}`,
+      502,
+    );
   }
 }
 
@@ -485,6 +531,17 @@ async function handleAgentConversationMessage(
 }
 
 // --- Static Files ---
+
+if (FRONTEND_DEV_PROXY_TARGET) {
+  app.use('/*', async (c, next) => {
+    const requestPath = c.req.path;
+    if (requestPath.startsWith('/api') || requestPath.startsWith('/ws')) {
+      await next();
+      return;
+    }
+    return proxyFrontendDevRequest(c);
+  });
+}
 
 // 带 content hash 的静态资源：长期不可变缓存
 app.use(

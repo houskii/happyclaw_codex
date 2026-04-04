@@ -38,8 +38,12 @@ interface SystemDefaults {
   defaultLlmProvider?: 'claude' | 'openai';
   defaultAnthropicModel?: string;
   defaultOpenaiModel?: string;
+  defaultAnthropicThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
+  defaultOpenaiThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
   defaultClaudeModel?: string;
   defaultCodexModel?: string;
+  defaultClaudeThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
+  defaultCodexThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | '';
 }
 
 interface CreateContainerDialogProps {
@@ -65,13 +69,23 @@ export function CreateContainerDialog({
     defaultLlmProvider: 'claude',
     defaultAnthropicModel: '',
     defaultOpenaiModel: '',
+    defaultAnthropicThinkingEffort: '',
+    defaultOpenaiThinkingEffort: '',
     defaultClaudeModel: '',
     defaultCodexModel: '',
+    defaultClaudeThinkingEffort: '',
+    defaultCodexThinkingEffort: '',
   });
   const [defaultsLoaded, setDefaultsLoaded] = useState(false);
   const [llmProvider, setLlmProvider] = useState<'claude' | 'openai'>('claude');
-  const [model, setModel] = useState('');
-  const [thinkingEffort, setThinkingEffort] = useState<'default' | 'low' | 'medium' | 'high'>('default');
+  const [claudeModel, setClaudeModel] = useState('');
+  const [codexModel, setCodexModel] = useState('');
+  const [claudeThinkingEffort, setClaudeThinkingEffort] = useState<
+    'default' | 'low' | 'medium' | 'high' | 'xhigh'
+  >('default');
+  const [codexThinkingEffort, setCodexThinkingEffort] = useState<
+    'default' | 'low' | 'medium' | 'high' | 'xhigh'
+  >('default');
   const [contextCompression, setContextCompression] = useState('');
   const [knowledgeExtraction, setKnowledgeExtraction] = useState(false);
 
@@ -80,21 +94,40 @@ export function CreateContainerDialog({
   const { models: codexModels, loading: codexModelsLoading } = useCodexModels(
     open && advancedOpen && llmProvider === 'openai',
   );
+  const model = llmProvider === 'openai' ? codexModel : claudeModel;
+  const thinkingEffort =
+    llmProvider === 'openai' ? codexThinkingEffort : claudeThinkingEffort;
 
   const applyDefaults = (defaults?: SystemDefaults) => {
     const provider = defaults?.defaultLlmProvider ?? 'claude';
     const anthropicDefault = defaults?.defaultAnthropicModel ?? defaults?.defaultClaudeModel ?? '';
     const openaiDefault = defaults?.defaultOpenaiModel ?? defaults?.defaultCodexModel ?? '';
+    const anthropicThinkingDefault =
+      defaults?.defaultAnthropicThinkingEffort ??
+      defaults?.defaultClaudeThinkingEffort ??
+      '';
+    const openaiThinkingDefault =
+      defaults?.defaultOpenaiThinkingEffort ??
+      defaults?.defaultCodexThinkingEffort ??
+      '';
     setSystemDefaults({
       defaultLlmProvider: provider,
       defaultAnthropicModel: anthropicDefault,
       defaultOpenaiModel: openaiDefault,
+      defaultAnthropicThinkingEffort: anthropicThinkingDefault,
+      defaultOpenaiThinkingEffort: openaiThinkingDefault,
       defaultClaudeModel: defaults?.defaultClaudeModel ?? anthropicDefault,
       defaultCodexModel: defaults?.defaultCodexModel ?? openaiDefault,
+      defaultClaudeThinkingEffort:
+        defaults?.defaultClaudeThinkingEffort ?? anthropicThinkingDefault,
+      defaultCodexThinkingEffort:
+        defaults?.defaultCodexThinkingEffort ?? openaiThinkingDefault,
     });
     setLlmProvider(provider);
-    setModel(provider === 'openai' ? openaiDefault : anthropicDefault);
-    setThinkingEffort('default');
+    setClaudeModel(anthropicDefault);
+    setCodexModel(openaiDefault);
+    setClaudeThinkingEffort(anthropicThinkingDefault || 'default');
+    setCodexThinkingEffort(openaiThinkingDefault || 'default');
     setContextCompression('');
     setKnowledgeExtraction(false);
   };
@@ -146,12 +179,13 @@ export function CreateContainerDialog({
       systemDefaults.defaultAnthropicModel ?? systemDefaults.defaultClaudeModel ?? '';
     const openaiDefault =
       systemDefaults.defaultOpenaiModel ?? systemDefaults.defaultCodexModel ?? '';
-    const nextDefault = llmProvider === 'openai' ? openaiDefault : anthropicDefault;
-
-    if (!model.trim() || model === anthropicDefault || model === openaiDefault) {
-      setModel(nextDefault);
+    if (!claudeModel.trim() || claudeModel === anthropicDefault) {
+      setClaudeModel(anthropicDefault);
     }
-  }, [defaultsLoaded, llmProvider, model, systemDefaults]);
+    if (!codexModel.trim() || codexModel === openaiDefault) {
+      setCodexModel(openaiDefault);
+    }
+  }, [claudeModel, codexModel, defaultsLoaded, systemDefaults]);
 
   const handleConfirm = async () => {
     const trimmed = name.trim();
@@ -165,8 +199,12 @@ export function CreateContainerDialog({
         init_source_path?: string;
         init_git_url?: string;
         llm_provider?: 'claude' | 'openai';
+        claude_model?: string | null;
+        claude_thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
+        codex_model?: string | null;
+        codex_thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
         model?: string;
-        thinking_effort?: 'low' | 'medium' | 'high' | null;
+        thinking_effort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
         context_compression?: string;
         knowledge_extraction?: boolean;
       } = {};
@@ -181,6 +219,12 @@ export function CreateContainerDialog({
         }
       }
       options.llm_provider = llmProvider;
+      options.claude_model = claudeModel.trim() || null;
+      options.claude_thinking_effort =
+        claudeThinkingEffort === 'default' ? null : claudeThinkingEffort;
+      options.codex_model = codexModel.trim() || null;
+      options.codex_thinking_effort =
+        codexThinkingEffort === 'default' ? null : codexThinkingEffort;
       if (model.trim()) options.model = model.trim();
       if (thinkingEffort !== 'default') options.thinking_effort = thinkingEffort;
       if (contextCompression.trim()) options.context_compression = contextCompression.trim();
@@ -393,7 +437,13 @@ export function CreateContainerDialog({
                         <Input
                           list={llmProvider === 'openai' ? 'codex-model-options' : undefined}
                           value={model}
-                          onChange={(e) => setModel(e.target.value)}
+                          onChange={(e) => {
+                            if (llmProvider === 'openai') {
+                              setCodexModel(e.target.value);
+                            } else {
+                              setClaudeModel(e.target.value);
+                            }
+                          }}
                           placeholder="留空时跟随系统默认模型"
                         />
                         {llmProvider === 'openai' && (
@@ -416,7 +466,14 @@ export function CreateContainerDialog({
                         <Label className="mb-2 text-xs text-muted-foreground">推理强度</Label>
                         <Select
                           value={thinkingEffort}
-                          onValueChange={(value) => setThinkingEffort(value as 'default' | 'low' | 'medium' | 'high')}
+                          onValueChange={(value) => {
+                            const nextValue = value as 'default' | 'low' | 'medium' | 'high' | 'xhigh';
+                            if (llmProvider === 'openai') {
+                              setCodexThinkingEffort(nextValue);
+                            } else {
+                              setClaudeThinkingEffort(nextValue);
+                            }
+                          }}
                         >
                           <SelectTrigger className="w-full">
                             <SelectValue />
@@ -426,6 +483,7 @@ export function CreateContainerDialog({
                             <SelectItem value="low">低</SelectItem>
                             <SelectItem value="medium">中</SelectItem>
                             <SelectItem value="high">高</SelectItem>
+                            <SelectItem value="xhigh">超高</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>

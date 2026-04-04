@@ -3,7 +3,7 @@ import { resolveDefaultLlmBindingFromSystem } from './provider-adapters/registry
 
 export function getDefaultLlmBinding(): Pick<
   RegisteredGroup,
-  'llm_provider' | 'model'
+  'llm_provider' | 'model' | 'thinking_effort'
 > {
   return resolveDefaultLlmBindingFromSystem();
 }

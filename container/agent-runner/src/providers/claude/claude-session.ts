@@ -179,7 +179,15 @@ export class ClaudeSession {
           allowedTools: config.allowedTools,
           ...(config.disallowedTools && { disallowedTools: config.disallowedTools }),
           ...(config.thinkingEffort
-            ? { effort: config.thinkingEffort as 'low' | 'medium' | 'high' | 'max' }
+            ? {
+                effort: (config.thinkingEffort === 'xhigh'
+                  ? 'max'
+                  : config.thinkingEffort) as
+                  | 'low'
+                  | 'medium'
+                  | 'high'
+                  | 'max',
+              }
             : {}),
           permissionMode: config.permissionMode ?? 'bypassPermissions',
           allowDangerouslySkipPermissions: true,

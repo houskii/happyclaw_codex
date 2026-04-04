@@ -30,10 +30,14 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const [llmProvider, setLlmProvider] = useState<'claude' | 'openai'>(
     effectiveGroup.llm_provider ?? 'claude',
   );
-  const [model, setModel] = useState(effectiveGroup.model ?? '');
-  const [thinkingEffort, setThinkingEffort] = useState<
-    'default' | 'low' | 'medium' | 'high'
-  >(effectiveGroup.thinking_effort ?? 'default');
+  const [claudeModel, setClaudeModel] = useState(effectiveGroup.claude_model ?? '');
+  const [codexModel, setCodexModel] = useState(effectiveGroup.codex_model ?? '');
+  const [claudeThinkingEffort, setClaudeThinkingEffort] = useState<
+    'default' | 'low' | 'medium' | 'high' | 'xhigh'
+  >(effectiveGroup.claude_thinking_effort ?? 'default');
+  const [codexThinkingEffort, setCodexThinkingEffort] = useState<
+    'default' | 'low' | 'medium' | 'high' | 'xhigh'
+  >(effectiveGroup.codex_thinking_effort ?? 'default');
   const [contextCompression, setContextCompression] = useState(
     effectiveGroup.context_compression === 'off'
       ? ''
@@ -45,11 +49,16 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const { models: codexModels, loading: codexModelsLoading } = useCodexModels(
     llmProvider === 'openai',
   );
+  const model = llmProvider === 'openai' ? codexModel : claudeModel;
+  const thinkingEffort =
+    llmProvider === 'openai' ? codexThinkingEffort : claudeThinkingEffort;
 
   useEffect(() => {
     setLlmProvider(effectiveGroup.llm_provider ?? 'claude');
-    setModel(effectiveGroup.model ?? '');
-    setThinkingEffort(effectiveGroup.thinking_effort ?? 'default');
+    setClaudeModel(effectiveGroup.claude_model ?? '');
+    setCodexModel(effectiveGroup.codex_model ?? '');
+    setClaudeThinkingEffort(effectiveGroup.claude_thinking_effort ?? 'default');
+    setCodexThinkingEffort(effectiveGroup.codex_thinking_effort ?? 'default');
     setContextCompression(
       effectiveGroup.context_compression === 'off'
         ? ''
@@ -60,15 +69,19 @@ export function GroupDetail({ group }: GroupDetailProps) {
     effectiveGroup.context_compression,
     effectiveGroup.knowledge_extraction,
     effectiveGroup.llm_provider,
-    effectiveGroup.model,
-    effectiveGroup.thinking_effort,
+    effectiveGroup.claude_model,
+    effectiveGroup.claude_thinking_effort,
+    effectiveGroup.codex_model,
+    effectiveGroup.codex_thinking_effort,
   ]);
 
   const hasRuntimeChanges = useMemo(() => {
     return (
       llmProvider !== (effectiveGroup.llm_provider ?? 'claude') ||
-      model !== (effectiveGroup.model ?? '') ||
-      thinkingEffort !== (effectiveGroup.thinking_effort ?? 'default') ||
+      claudeModel !== (effectiveGroup.claude_model ?? '') ||
+      codexModel !== (effectiveGroup.codex_model ?? '') ||
+      claudeThinkingEffort !== (effectiveGroup.claude_thinking_effort ?? 'default') ||
+      codexThinkingEffort !== (effectiveGroup.codex_thinking_effort ?? 'default') ||
       contextCompression !==
         (effectiveGroup.context_compression === 'off'
           ? ''
@@ -78,14 +91,18 @@ export function GroupDetail({ group }: GroupDetailProps) {
   }, [
     contextCompression,
     effectiveGroup.context_compression,
+    effectiveGroup.claude_model,
+    effectiveGroup.claude_thinking_effort,
+    effectiveGroup.codex_model,
+    effectiveGroup.codex_thinking_effort,
     effectiveGroup.knowledge_extraction,
     effectiveGroup.llm_provider,
-    effectiveGroup.model,
-    effectiveGroup.thinking_effort,
+    claudeModel,
+    claudeThinkingEffort,
+    codexModel,
+    codexThinkingEffort,
     knowledgeExtraction,
     llmProvider,
-    model,
-    thinkingEffort,
   ]);
 
   const formatDate = (timestamp: string | number) => {
@@ -103,6 +120,12 @@ export function GroupDetail({ group }: GroupDetailProps) {
     try {
       const ok = await updateFlowSettings(group.jid, {
         llm_provider: llmProvider,
+        claude_model: claudeModel,
+        claude_thinking_effort:
+          claudeThinkingEffort === 'default' ? null : claudeThinkingEffort,
+        codex_model: codexModel,
+        codex_thinking_effort:
+          codexThinkingEffort === 'default' ? null : codexThinkingEffort,
         model,
         thinking_effort:
           thinkingEffort === 'default' ? null : thinkingEffort,
@@ -191,7 +214,13 @@ export function GroupDetail({ group }: GroupDetailProps) {
                 <Input
                   list={llmProvider === 'openai' ? `codex-model-options-${group.jid}` : undefined}
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  onChange={(e) => {
+                    if (llmProvider === 'openai') {
+                      setCodexModel(e.target.value);
+                    } else {
+                      setClaudeModel(e.target.value);
+                    }
+                  }}
                   placeholder="留空时跟随系统默认模型"
                 />
                 {llmProvider === 'openai' && (
@@ -214,7 +243,14 @@ export function GroupDetail({ group }: GroupDetailProps) {
                 <Label className="mb-2 text-xs text-muted-foreground">推理强度</Label>
                 <Select
                   value={thinkingEffort}
-                  onValueChange={(value) => setThinkingEffort(value as 'default' | 'low' | 'medium' | 'high')}
+                  onValueChange={(value) => {
+                    const nextValue = value as 'default' | 'low' | 'medium' | 'high' | 'xhigh';
+                    if (llmProvider === 'openai') {
+                      setCodexThinkingEffort(nextValue);
+                    } else {
+                      setClaudeThinkingEffort(nextValue);
+                    }
+                  }}
                 >
                   <SelectTrigger className="w-full">
                     <SelectValue />
@@ -224,6 +260,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
                     <SelectItem value="low">低</SelectItem>
                     <SelectItem value="medium">中</SelectItem>
                     <SelectItem value="high">高</SelectItem>
+                    <SelectItem value="xhigh">超高</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

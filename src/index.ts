@@ -102,8 +102,10 @@ import {
   formatContextMessages,
   formatWorkspaceList,
   formatSystemStatus,
+  formatWorkspaceRuntimeDetails,
   resolveLocationInfo,
   type WorkspaceInfo,
+  type WorkspaceRuntimeDetails,
 } from './im-command-utils.js';
 import {
   loadMountAllowlist,
@@ -122,6 +124,7 @@ import {
   getUserDingTalkConfig,
   getUserIMPreferences,
   getSystemSettings,
+  resolveDefaultWorkspaceExecutionMode,
   getContainerEnvConfig,
   saveContainerEnvConfig,
   saveUserFeishuConfig,
@@ -155,6 +158,8 @@ import {
   RegisteredGroup,
   StreamEvent,
   SubAgent,
+  ThinkingEffort,
+  WorkspaceLlmProvider,
 } from './types.js';
 import { logger } from './logger.js';
 import {
@@ -1076,8 +1081,8 @@ async function handleCommand(
     case 'recall':
     case 'rc':
       return handleRecallCommand(chatJid);
-    case 'where':
-      return handleWhereCommand(chatJid);
+    case 'view':
+      return handleViewCommand(chatJid);
     case 'unbind':
       return handleUnbindCommand(chatJid);
     case 'bind':
@@ -1102,12 +1107,12 @@ function handleHelpCommand(): string {
     '/help — 查看指令说明\n' +
     '/list — 查看所有工作区\n' +
     '/status — 查看当前队列与运行状态\n' +
-    '/where — 查看当前绑定位置\n' +
+    '/view — 查看当前绑定工作区与运行参数\n' +
     '/bind <workspace> 或 /bind <workspace>/<agent短ID> — 绑定到已有工作区\n' +
     '/unbind — 解绑回默认工作区\n' +
     '/new <名称> [--provider claude|openai] [--mode container|host] [--workspace <目录>] — 新建工作区并绑定此群\n' +
     '/new --help — 查看 /new 参数说明\n' +
-    '/modify [--provider claude|openai] [--mode container|host] [--workspace <目录>] [--env KEY=VALUE] [--unset-env KEY] — 修改当前工作区\n' +
+    '/modify [--provider claude|openai] [--mode container|host] [--workspace <目录>] [--model <模型>] [--thinking <强度>] [--claude-model <模型>] [--claude-thinking <强度>] [--codex-model <模型>] [--codex-thinking <强度>] [--env KEY=VALUE] [--unset-env KEY] — 修改当前工作区\n' +
     '/modify --help — 查看 /modify 参数说明\n' +
     '/clear — 清除当前会话上下文\n' +
     '/recall — 总结最近对话\n' +
@@ -1200,7 +1205,7 @@ function formatNewCommandHelp(): string {
     '说明：\n' +
     '- 第一个非参数值为工作区名称，支持用引号包裹空格\n' +
     '- --provider 可选，默认跟随系统默认 Provider\n' +
-    '- --mode 可选，默认自动选择（有 Docker 时 container，否则 host）\n' +
+    '- --mode 可选，默认跟随系统参数；当默认是 host 但当前用户无权限时会自动回退到 container\n' +
     '- --workspace 仅在 host 模式下生效，表示宿主机工作目录（绝对路径）'
   );
 }
@@ -1210,6 +1215,12 @@ function parseModifyCommandArgs(rawArgs: string): {
   llmProvider?: 'claude' | 'openai';
   executionMode?: 'container' | 'host';
   customCwd?: string;
+  model?: string | null;
+  thinkingEffort?: ThinkingEffort | null;
+  claudeModel?: string | null;
+  claudeThinkingEffort?: ThinkingEffort | null;
+  codexModel?: string | null;
+  codexThinkingEffort?: ThinkingEffort | null;
   setEnv: Record<string, string>;
   unsetEnv: string[];
   error?: string;
@@ -1219,8 +1230,43 @@ function parseModifyCommandArgs(rawArgs: string): {
   let llmProvider: 'claude' | 'openai' | undefined;
   let executionMode: 'container' | 'host' | undefined;
   let customCwd: string | undefined;
+  let model: string | null | undefined;
+  let thinkingEffort: ThinkingEffort | null | undefined;
+  let claudeModel: string | null | undefined;
+  let claudeThinkingEffort: ThinkingEffort | null | undefined;
+  let codexModel: string | null | undefined;
+  let codexThinkingEffort: ThinkingEffort | null | undefined;
   const setEnv: Record<string, string> = {};
   const unsetEnv: string[] = [];
+  const normalizeModelArg = (value: string | undefined, flag: string) => {
+    if (!value) {
+      return { error: `缺少 ${flag} 的值` } as const;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'default') {
+      return { value: null } as const;
+    }
+    return { value: trimmed } as const;
+  };
+  const normalizeThinkingArg = (
+    value: string | undefined,
+    flag: string,
+  ): { value?: ThinkingEffort | null; error?: string } => {
+    if (!value) return { error: `缺少 ${flag} 的值` };
+    const normalized = value.trim().toLowerCase();
+    if (!normalized || normalized === 'default') return { value: null };
+    if (
+      normalized !== 'low' &&
+      normalized !== 'medium' &&
+      normalized !== 'high' &&
+      normalized !== 'xhigh'
+    ) {
+      return {
+        error: `${flag} 仅支持 low、medium、high、xhigh 或 default`,
+      };
+    }
+    return { value: normalized as ThinkingEffort };
+  };
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -1252,6 +1298,48 @@ function parseModifyCommandArgs(rawArgs: string): {
       const value = tokens[i + 1];
       if (!value) return { help, setEnv, unsetEnv, error: '缺少 --workspace 的值' };
       customCwd = value.trim() || undefined;
+      i += 1;
+      continue;
+    }
+    if (token === '--model') {
+      const result = normalizeModelArg(tokens[i + 1], '--model');
+      if ('error' in result) return { help, setEnv, unsetEnv, error: result.error };
+      model = result.value;
+      i += 1;
+      continue;
+    }
+    if (token === '--thinking') {
+      const result = normalizeThinkingArg(tokens[i + 1], '--thinking');
+      if (result.error) return { help, setEnv, unsetEnv, error: result.error };
+      thinkingEffort = result.value;
+      i += 1;
+      continue;
+    }
+    if (token === '--claude-model') {
+      const result = normalizeModelArg(tokens[i + 1], '--claude-model');
+      if ('error' in result) return { help, setEnv, unsetEnv, error: result.error };
+      claudeModel = result.value;
+      i += 1;
+      continue;
+    }
+    if (token === '--claude-thinking') {
+      const result = normalizeThinkingArg(tokens[i + 1], '--claude-thinking');
+      if (result.error) return { help, setEnv, unsetEnv, error: result.error };
+      claudeThinkingEffort = result.value;
+      i += 1;
+      continue;
+    }
+    if (token === '--codex-model') {
+      const result = normalizeModelArg(tokens[i + 1], '--codex-model');
+      if ('error' in result) return { help, setEnv, unsetEnv, error: result.error };
+      codexModel = result.value;
+      i += 1;
+      continue;
+    }
+    if (token === '--codex-thinking') {
+      const result = normalizeThinkingArg(tokens[i + 1], '--codex-thinking');
+      if (result.error) return { help, setEnv, unsetEnv, error: result.error };
+      codexThinkingEffort = result.value;
       i += 1;
       continue;
     }
@@ -1289,6 +1377,12 @@ function parseModifyCommandArgs(rawArgs: string): {
     llmProvider,
     executionMode,
     customCwd,
+    model,
+    thinkingEffort,
+    claudeModel,
+    claudeThinkingEffort,
+    codexModel,
+    codexThinkingEffort,
     setEnv,
     unsetEnv,
   };
@@ -1297,17 +1391,100 @@ function parseModifyCommandArgs(rawArgs: string): {
 function formatModifyCommandHelp(): string {
   return (
     '用法：\n' +
-    '/modify [--provider claude|openai] [--mode container|host] [--workspace <目录>] [--env KEY=VALUE] [--unset-env KEY]\n\n' +
+    '/modify [--provider claude|openai] [--mode container|host] [--workspace <目录>] [--model <模型>] [--thinking <强度>] [--claude-model <模型>] [--claude-thinking <强度>] [--codex-model <模型>] [--codex-thinking <强度>] [--env KEY=VALUE] [--unset-env KEY]\n\n' +
     '示例：\n' +
     '/modify --provider openai\n' +
+    '/modify --model gpt-5.4 --thinking xhigh\n' +
+    '/modify --claude-model opus --claude-thinking high\n' +
+    '/modify --codex-model gpt-5.4-mini --codex-thinking medium\n' +
     '/modify --mode host --workspace /Users/me/projects/support\n' +
     '/modify --env HTTP_PROXY=http://127.0.0.1:7890 --env NO_PROXY=localhost,127.0.0.1\n' +
     '/modify --unset-env HTTP_PROXY\n\n' +
     '说明：\n' +
     '- 默认修改当前聊天绑定的工作区\n' +
+    '- --model / --thinking 会写入当前或显式指定 provider 对应的默认运行参数\n' +
+    '- --claude-* / --codex-* 用于分别设置两套 provider 参数\n' +
+    '- 推理强度支持 low / medium / high / xhigh / default\n' +
     '- --workspace 仅在 host 模式下生效，表示宿主机工作目录（绝对路径）\n' +
     '- --env / --unset-env 修改当前工作区的环境变量覆盖，并在容器模式下触发重建'
   );
+}
+
+function resolveWorkspaceRuntimeDetails(
+  group: RegisteredGroup,
+  locationLine: string,
+  workspaceName: string,
+  replyPolicy: string | null,
+): WorkspaceRuntimeDetails {
+  const settings = getSystemSettings();
+  const llmProvider: WorkspaceLlmProvider =
+    group.llm_provider === 'openai' ? 'openai' : 'claude';
+  const claudeModel =
+    group.claude_model ?? settings.defaultClaudeModel ?? undefined;
+  const claudeThinkingEffort =
+    group.claude_thinking_effort ??
+    settings.defaultClaudeThinkingEffort ??
+    undefined;
+  const codexModel = group.codex_model ?? settings.defaultCodexModel ?? undefined;
+  const codexThinkingEffort =
+    group.codex_thinking_effort ??
+    settings.defaultCodexThinkingEffort ??
+    undefined;
+  const effectiveModel = llmProvider === 'claude' ? claudeModel : codexModel;
+  const effectiveThinkingEffort =
+    llmProvider === 'claude'
+      ? claudeThinkingEffort
+      : codexThinkingEffort;
+  return {
+    locationLine,
+    workspaceName,
+    folder: group.folder,
+    executionMode: group.executionMode ?? 'container',
+    llmProvider,
+    effectiveModel,
+    effectiveThinkingEffort,
+    claudeModel,
+    claudeThinkingEffort,
+    codexModel,
+    codexThinkingEffort,
+    customCwd: group.executionMode === 'host' ? group.customCwd ?? null : null,
+    contextCompression: group.context_compression ?? null,
+    knowledgeExtraction: group.knowledge_extraction === true,
+    replyPolicy,
+  };
+}
+
+function getWorkspaceInfoForChat(chatJid: string): {
+  details: WorkspaceRuntimeDetails;
+  workspaceJid: string;
+  workspaceGroup: RegisteredGroup;
+} | null {
+  const sourceGroup = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!sourceGroup) return null;
+  const lookupGroup = (jid: string) =>
+    registeredGroups[jid] ?? getRegisteredGroup(jid);
+  const location = resolveLocationInfo(
+    sourceGroup,
+    lookupGroup,
+    getAgent,
+    findGroupNameByFolder,
+  );
+  const workspaceJid = resolveCurrentWorkspaceJid(chatJid);
+  if (!workspaceJid) return null;
+  const workspaceGroup = lookupGroup(workspaceJid);
+  if (!workspaceGroup) return null;
+  const workspaceName =
+    findGroupNameByFolder(workspaceGroup.folder) || workspaceGroup.name;
+  return {
+    details: resolveWorkspaceRuntimeDetails(
+      workspaceGroup,
+      location.locationLine,
+      workspaceName,
+      location.replyPolicy,
+    ),
+    workspaceJid,
+    workspaceGroup,
+  };
 }
 
 async function handleClearCommand(chatJid: string): Promise<string> {
@@ -1541,24 +1718,10 @@ function handleStatusCommand(chatJid: string): string {
   );
 }
 
-function handleWhereCommand(chatJid: string): string {
-  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
-  if (!group) return '当前 IM 未绑定工作区';
-
-  const lookupGroup = (jid: string) =>
-    registeredGroups[jid] ?? getRegisteredGroup(jid);
-  const location = resolveLocationInfo(
-    group,
-    lookupGroup,
-    getAgent,
-    findGroupNameByFolder,
-  );
-
-  const lines = [`📍 当前绑定: ${location.locationLine}`];
-  if (location.replyPolicy) {
-    lines.push(`🔁 回复策略: ${location.replyPolicy}`);
-  }
-  return lines.join('\n');
+function handleViewCommand(chatJid: string): string {
+  const info = getWorkspaceInfoForChat(chatJid);
+  if (!info) return '当前 IM 未绑定工作区';
+  return formatWorkspaceRuntimeDetails(info.details);
 }
 
 function handleUnbindCommand(chatJid: string): string {
@@ -1590,10 +1753,12 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
-  registeredGroups[chatJid] = updated;
+  registeredGroups[chatJid] = getRegisteredGroup(chatJid) ?? updated;
   imSendFailCounts.delete(chatJid);
   imHealthCheckFailCounts.delete(chatJid);
-  return `已切换到 ${resolved.display}\n🔁 回复策略: source_only`;
+  const info = getWorkspaceInfoForChat(chatJid);
+  if (!info) return `已切换到 ${resolved.display}\n🔁 回复策略: source_only`;
+  return `已切换到 ${resolved.display}\n\n${formatWorkspaceRuntimeDetails(info.details)}`;
 }
 
 function resolveCurrentWorkspaceJid(chatJid: string): string | null {
@@ -1693,21 +1858,61 @@ async function handleModifyCommand(
   const hasRuntimeChanges =
     parsed.llmProvider !== undefined ||
     parsed.executionMode !== undefined ||
-    parsed.customCwd !== undefined;
+    parsed.customCwd !== undefined ||
+    parsed.model !== undefined ||
+    parsed.thinkingEffort !== undefined ||
+    parsed.claudeModel !== undefined ||
+    parsed.claudeThinkingEffort !== undefined ||
+    parsed.codexModel !== undefined ||
+    parsed.codexThinkingEffort !== undefined;
 
   if (!hasRuntimeChanges && !hasEnvChanges) {
     return formatModifyCommandHelp();
   }
 
   if (hasRuntimeChanges) {
+    const targetProvider: WorkspaceLlmProvider =
+      parsed.llmProvider ?? existing.llm_provider ?? 'claude';
+    const nextClaudeModel =
+      parsed.claudeModel ??
+      (parsed.model !== undefined && targetProvider === 'claude'
+        ? parsed.model
+        : existing.claude_model);
+    const nextClaudeThinkingEffort =
+      parsed.claudeThinkingEffort ??
+      (parsed.thinkingEffort !== undefined && targetProvider === 'claude'
+        ? parsed.thinkingEffort
+        : existing.claude_thinking_effort);
+    const nextCodexModel =
+      parsed.codexModel ??
+      (parsed.model !== undefined && targetProvider === 'openai'
+        ? parsed.model
+        : existing.codex_model);
+    const nextCodexThinkingEffort =
+      parsed.codexThinkingEffort ??
+      (parsed.thinkingEffort !== undefined && targetProvider === 'openai'
+        ? parsed.thinkingEffort
+        : existing.codex_thinking_effort);
+    const effectiveModel =
+      targetProvider === 'claude' ? nextClaudeModel : nextCodexModel;
+    const effectiveThinkingEffort =
+      targetProvider === 'claude'
+        ? nextClaudeThinkingEffort
+        : nextCodexThinkingEffort;
     const updated: RegisteredGroup = {
       ...existing,
       executionMode: nextExecutionMode,
       customCwd: resolvedCustomCwd,
-      llm_provider: parsed.llmProvider ?? existing.llm_provider,
+      llm_provider: targetProvider,
+      claude_model: nextClaudeModel ?? undefined,
+      claude_thinking_effort: nextClaudeThinkingEffort ?? undefined,
+      codex_model: nextCodexModel ?? undefined,
+      codex_thinking_effort: nextCodexThinkingEffort ?? undefined,
+      model: effectiveModel ?? undefined,
+      thinking_effort: effectiveThinkingEffort ?? undefined,
     };
     setRegisteredGroup(workspaceJid, updated);
-    registeredGroups[workspaceJid] = updated;
+    registeredGroups[workspaceJid] = getRegisteredGroup(workspaceJid) ?? updated;
   }
 
   if (hasEnvChanges) {
@@ -1732,6 +1937,28 @@ async function handleModifyCommand(
   if (parsed.customCwd !== undefined && nextExecutionMode === 'host') {
     summary.push(`工作目录=${resolvedCustomCwd}`);
   }
+  if (parsed.model !== undefined) {
+    summary.push(`当前 Provider 模型=${parsed.model ?? '跟随默认值'}`);
+  }
+  if (parsed.thinkingEffort !== undefined) {
+    summary.push(`当前 Provider 推理强度=${parsed.thinkingEffort ?? '跟随默认值'}`);
+  }
+  if (parsed.claudeModel !== undefined) {
+    summary.push(`Claude 模型=${parsed.claudeModel ?? '跟随默认值'}`);
+  }
+  if (parsed.claudeThinkingEffort !== undefined) {
+    summary.push(
+      `Claude 推理强度=${parsed.claudeThinkingEffort ?? '跟随默认值'}`,
+    );
+  }
+  if (parsed.codexModel !== undefined) {
+    summary.push(`Codex 模型=${parsed.codexModel ?? '跟随默认值'}`);
+  }
+  if (parsed.codexThinkingEffort !== undefined) {
+    summary.push(
+      `Codex 推理强度=${parsed.codexThinkingEffort ?? '跟随默认值'}`,
+    );
+  }
   if (setEnvKeys.length > 0) {
     summary.push(`设置环境变量=${setEnvKeys.join(', ')}`);
   }
@@ -1752,7 +1979,12 @@ async function handleModifyCommand(
     );
   }
 
-  return `当前工作区已更新\n${summary.map((item) => `- ${item}`).join('\n')}`;
+  const info = getWorkspaceInfoForChat(chatJid);
+  const summaryText = summary.map((item) => `- ${item}`).join('\n');
+  if (!info) {
+    return `当前工作区已更新\n${summaryText}`;
+  }
+  return `当前工作区已更新\n${summaryText}\n\n${formatWorkspaceRuntimeDetails(info.details)}`;
 }
 
 async function handleNewCommand(
@@ -1777,11 +2009,16 @@ async function handleNewCommand(
   }
 
   const owner = getUserById(userId);
+  const dockerAvailable = await isDockerAvailable();
   const executionMode =
     parsed.executionMode ??
     (parsed.customCwd
       ? 'host'
-      : (await isDockerAvailable()) ? 'container' : 'host');
+      : resolveDefaultWorkspaceExecutionMode({
+          configuredMode: getSystemSettings().defaultWorkspaceExecutionMode,
+          dockerAvailable,
+          allowHost: owner?.role === 'admin',
+        }));
 
   if (executionMode === 'host' && owner?.role !== 'admin') {
     return '仅管理员可以通过 /new 创建宿主机模式工作区';
@@ -1792,6 +2029,7 @@ async function handleNewCommand(
   const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();
   const defaultLlmBinding = getDefaultLlmBinding();
+  const llmProvider = parsed.llmProvider ?? defaultLlmBinding.llm_provider;
 
   const newGroup: RegisteredGroup = {
     name,
@@ -1801,7 +2039,19 @@ async function handleNewCommand(
     customCwd: executionMode === 'host' ? parsed.customCwd : undefined,
     created_by: userId,
     ...defaultLlmBinding,
-    llm_provider: parsed.llmProvider ?? defaultLlmBinding.llm_provider,
+    llm_provider: llmProvider,
+    claude_model:
+      llmProvider === 'claude' ? defaultLlmBinding.model ?? undefined : undefined,
+    claude_thinking_effort:
+      llmProvider === 'claude'
+        ? defaultLlmBinding.thinking_effort ?? undefined
+        : undefined,
+    codex_model:
+      llmProvider === 'openai' ? defaultLlmBinding.model ?? undefined : undefined,
+    codex_thinking_effort:
+      llmProvider === 'openai'
+        ? defaultLlmBinding.thinking_effort ?? undefined
+        : undefined,
   };
 
   // Register the workspace
@@ -1818,11 +2068,14 @@ async function handleNewCommand(
     reply_policy: 'source_only',
   };
   setRegisteredGroup(chatJid, updated);
-  registeredGroups[chatJid] = updated;
+  registeredGroups[chatJid] = getRegisteredGroup(chatJid) ?? updated;
   imSendFailCounts.delete(chatJid);
   imHealthCheckFailCounts.delete(chatJid);
-
-  return `工作区「${name}」已创建并绑定\n📁 ${folder}\n🔁 回复策略: source_only\n\n发送 /unbind 可解绑回默认工作区`;
+  const info = getWorkspaceInfoForChat(chatJid);
+  const details = info
+    ? `\n\n${formatWorkspaceRuntimeDetails(info.details)}`
+    : `\n📁 ${folder}\n🔁 回复策略: source_only`;
+  return `工作区「${name}」已创建并绑定${details}\n\n发送 /unbind 可解绑回默认工作区`;
 }
 
 function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
@@ -2468,8 +2721,8 @@ function saveState(): void {
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
-  registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
+  registeredGroups[jid] = getRegisteredGroup(jid) ?? group;
 
   // Create group folder
   const groupDir = path.join(GROUPS_DIR, group.folder);
@@ -6608,7 +6861,13 @@ function buildOnNewChat(
       const newJid = `web:${crypto.randomUUID()}`;
       const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const now = new Date().toISOString();
-      const execMode = prefs.autoCreateExecutionMode || 'host';
+      const owner = getUserById(userId);
+      const execMode =
+        prefs.autoCreateExecutionMode ||
+        resolveDefaultWorkspaceExecutionMode({
+          configuredMode: getSystemSettings().defaultWorkspaceExecutionMode,
+          allowHost: owner?.role === 'admin',
+        });
 
       const newGroup: RegisteredGroup = {
         name: chatName,
@@ -6700,6 +6959,7 @@ function buildTelegramBotAddedHandler(
       `已加入「${chatName}」！当前绑定到默认工作区。\n\n` +
       `/new <名称> [--provider openai] [--mode host] [--workspace /path] — 新建工作区并绑定此群\n` +
       `/bind <工作区> — 绑定到已有工作区\n` +
+      `/view — 查看当前工作区参数\n` +
       `/list — 查看所有工作区\n` +
       `/help — 查看完整指令说明\n\n` +
       `也可以直接发消息，我会在默认工作区回复。`;
@@ -7442,6 +7702,9 @@ async function main(): Promise<void> {
         {
           ignoreMessagesBefore: Date.now(),
           onCommand: handleCommand,
+          resolveGroupFolder: (chatJid) => resolveEffectiveFolder(chatJid),
+          resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+          onAgentMessage: buildOnAgentMessage(),
           onBotAddedToGroup: buildOnNewChat(adminUser.id, homeFolder),
           onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
           shouldProcessGroupMessage,
@@ -7546,6 +7809,9 @@ async function main(): Promise<void> {
           {
             ignoreMessagesBefore,
             onCommand: handleCommand,
+            resolveGroupFolder: (chatJid) => resolveEffectiveFolder(chatJid),
+            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+            onAgentMessage: buildOnAgentMessage(),
             onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
             onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
             shouldProcessGroupMessage,

@@ -181,8 +181,75 @@ export function formatSystemStatus(
     `⚡ 状态: ${statusText}`,
     `📦 负载: ${queueStatus.activeContainerCount}/${queueStatus.maxContainers} 容器, ${queueStatus.activeHostProcessCount}/${queueStatus.maxHostProcesses} 进程`,
     '',
-    '💡 /sw <消息> 并行任务 · /where 绑定 · /list 全部',
+    '💡 /sw <消息> 并行任务 · /view 参数 · /list 全部',
   ];
+
+  return lines.join('\n');
+}
+
+export interface WorkspaceRuntimeDetails {
+  locationLine: string;
+  workspaceName: string;
+  folder: string;
+  executionMode: 'container' | 'host';
+  customCwd?: string | null;
+  llmProvider: 'claude' | 'openai';
+  effectiveModel?: string | null;
+  effectiveThinkingEffort?: string | null;
+  claudeModel?: string | null;
+  claudeThinkingEffort?: string | null;
+  codexModel?: string | null;
+  codexThinkingEffort?: string | null;
+  contextCompression?: string | null;
+  knowledgeExtraction?: boolean;
+  replyPolicy?: string | null;
+}
+
+function formatModelValue(value?: string | null): string {
+  return value?.trim() ? value.trim() : '跟随系统默认';
+}
+
+function formatThinkingEffortValue(value?: string | null): string {
+  if (!value) return '跟随模型默认';
+  switch (value) {
+    case 'low':
+      return '低';
+    case 'medium':
+      return '中';
+    case 'high':
+      return '高';
+    case 'xhigh':
+      return '超高';
+    default:
+      return value;
+  }
+}
+
+export function formatWorkspaceRuntimeDetails(
+  details: WorkspaceRuntimeDetails,
+): string {
+  const lines = [
+    `📍 当前绑定: ${details.locationLine}`,
+    `📁 工作区: ${details.workspaceName} (${details.folder})`,
+    `⚙️ 执行模式: ${details.executionMode}`,
+    `🤖 当前 Provider: ${details.llmProvider}`,
+    `🧠 当前生效: ${formatModelValue(details.effectiveModel)} / ${formatThinkingEffortValue(details.effectiveThinkingEffort)}`,
+    `Claude: ${formatModelValue(details.claudeModel)} / ${formatThinkingEffortValue(details.claudeThinkingEffort)}`,
+    `Codex: ${formatModelValue(details.codexModel)} / ${formatThinkingEffortValue(details.codexThinkingEffort)}`,
+  ];
+
+  if (details.customCwd) {
+    lines.push(`📂 工作目录: ${details.customCwd}`);
+  }
+  if (details.contextCompression) {
+    lines.push(`🗜️ 上下文压缩: ${details.contextCompression}`);
+  }
+  if (details.knowledgeExtraction === true) {
+    lines.push('📚 知识提取: 已开启');
+  }
+  if (details.replyPolicy) {
+    lines.push(`🔁 回复策略: ${details.replyPolicy}`);
+  }
 
   return lines.join('\n');
 }

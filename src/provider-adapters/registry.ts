@@ -47,16 +47,21 @@ export function resolveProviderId(
 
 export function resolveDefaultLlmBindingFromSystem(): Pick<
   RegisteredGroup,
-  'llm_provider' | 'model'
+  'llm_provider' | 'model' | 'thinking_effort'
 > {
   const settings = getSystemSettings();
   const providerId: ProviderId =
     settings.defaultLlmProvider === 'openai' ? 'codex' : 'claude';
   const adapter = registry.get(providerId);
   const model = adapter.getDefaultModel(settings).trim();
+  const thinkingEffort =
+    providerId === 'codex'
+      ? settings.defaultCodexThinkingEffort
+      : settings.defaultClaudeThinkingEffort;
   return {
     llm_provider: adapter.toWorkspaceProvider(),
     model: model || undefined,
+    thinking_effort: thinkingEffort || undefined,
   };
 }
 
@@ -73,4 +78,3 @@ export function getProviderUsageApiUrl(
 ): string {
   return registry.get(providerId).getUsageApiUrl(settings).trim();
 }
-

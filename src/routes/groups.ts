@@ -58,6 +58,8 @@ import {
   getContainerEnvConfig,
   saveContainerEnvConfig,
   toPublicContainerEnvConfig,
+  getSystemSettings,
+  resolveDefaultWorkspaceExecutionMode,
 } from '../runtime-config.js';
 import {
   loadMountAllowlist,
@@ -156,6 +158,10 @@ interface GroupPayloadItem {
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   llm_provider?: string;
+  claude_model?: string;
+  claude_thinking_effort?: string | null;
+  codex_model?: string;
+  codex_thinking_effort?: string | null;
   model?: string;
   thinking_effort?: string | null;
   context_compression?: string;
@@ -269,6 +275,10 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       pinned_at: pins[jid] || undefined,
       activation_mode: group.activation_mode ?? 'auto',
       llm_provider: group.llm_provider ?? getDefaultLlmBinding().llm_provider,
+      claude_model: group.claude_model ?? undefined,
+      claude_thinking_effort: group.claude_thinking_effort ?? null,
+      codex_model: group.codex_model ?? undefined,
+      codex_thinking_effort: group.codex_thinking_effort ?? null,
       model: group.model ?? undefined,
       thinking_effort: group.thinking_effort ?? null,
       context_compression: group.context_compression ?? 'off',
@@ -367,17 +377,27 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     return c.json({ error: 'Group name is required' }, 400);
   }
 
-  // If user didn't specify execution mode, pick based on Docker availability
-  const executionMode = validation.data.execution_mode || (await isDockerAvailable() ? 'container' : 'host');
+  const authUser = c.get('user') as AuthUser;
+  const dockerAvailable = await isDockerAvailable();
+  const executionMode =
+    validation.data.execution_mode ||
+    resolveDefaultWorkspaceExecutionMode({
+      configuredMode: getSystemSettings().defaultWorkspaceExecutionMode,
+      dockerAvailable,
+      allowHost: hasHostExecutionPermission(authUser),
+    });
   const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
   const llmProvider = validation.data.llm_provider;
+  const claudeModel = validation.data.claude_model;
+  const claudeThinkingEffort = validation.data.claude_thinking_effort;
+  const codexModel = validation.data.codex_model;
+  const codexThinkingEffort = validation.data.codex_thinking_effort;
   const model = validation.data.model;
   const thinkingEffort = validation.data.thinking_effort;
   const contextCompression = validation.data.context_compression;
   const knowledgeExtraction = validation.data.knowledge_extraction;
-  const authUser = c.get('user') as AuthUser;
 
   // Billing: check group limit
   const groupLimit = checkGroupLimit(authUser.id, authUser.role);
@@ -597,6 +617,10 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
     created_by: authUser.id,
     llm_provider: llmProvider ?? defaultLlmBinding.llm_provider,
+    claude_model: claudeModel,
+    claude_thinking_effort: claudeThinkingEffort,
+    codex_model: codexModel,
+    codex_thinking_effort: codexThinkingEffort,
     model: model ?? defaultLlmBinding.model,
     thinking_effort: thinkingEffort,
     context_compression: contextCompression,
@@ -676,6 +700,10 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       member_count: 1,
       is_shared: false,
       llm_provider: group.llm_provider,
+      claude_model: group.claude_model,
+      claude_thinking_effort: group.claude_thinking_effort ?? null,
+      codex_model: group.codex_model,
+      codex_thinking_effort: group.codex_thinking_effort ?? null,
       model: group.model,
       thinking_effort: group.thinking_effort ?? null,
       context_compression: group.context_compression ?? 'off',
@@ -708,6 +736,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     execution_mode,
     custom_cwd,
     llm_provider,
+    claude_model,
+    claude_thinking_effort,
+    codex_model,
+    codex_thinking_effort,
     model,
     thinking_effort,
     context_compression,
@@ -723,6 +755,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     execution_mode === undefined &&
     custom_cwd === undefined &&
     llm_provider === undefined &&
+    claude_model === undefined &&
+    claude_thinking_effort === undefined &&
+    codex_model === undefined &&
+    codex_thinking_effort === undefined &&
     model === undefined &&
     thinking_effort === undefined &&
     context_compression === undefined &&
@@ -861,6 +897,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     execution_mode !== undefined ||
     custom_cwd !== undefined ||
     llm_provider !== undefined ||
+    claude_model !== undefined ||
+    claude_thinking_effort !== undefined ||
+    codex_model !== undefined ||
+    codex_thinking_effort !== undefined ||
     model !== undefined ||
     thinking_effort !== undefined ||
     context_compression !== undefined ||
@@ -895,6 +935,18 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
           ? activation_mode
           : existing.activation_mode,
       llm_provider: llm_provider ?? existing.llm_provider,
+      claude_model:
+        claude_model !== undefined ? claude_model ?? undefined : existing.claude_model,
+      claude_thinking_effort:
+        claude_thinking_effort !== undefined
+          ? claude_thinking_effort ?? undefined
+          : existing.claude_thinking_effort,
+      codex_model:
+        codex_model !== undefined ? codex_model ?? undefined : existing.codex_model,
+      codex_thinking_effort:
+        codex_thinking_effort !== undefined
+          ? codex_thinking_effort ?? undefined
+          : existing.codex_thinking_effort,
       model: model !== undefined ? model ?? undefined : existing.model,
       thinking_effort:
         thinking_effort !== undefined ? thinking_effort ?? undefined : existing.thinking_effort,

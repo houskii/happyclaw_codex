@@ -4,6 +4,7 @@ import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import { logger } from './logger.js';
+import type { ThinkingEffort } from './types.js';
 
 const MAX_FIELD_LENGTH = 2000;
 const CURRENT_CONFIG_VERSION = 3;
@@ -3430,6 +3431,7 @@ export interface SystemSettings {
   containerMaxOutputSize: number;
   maxConcurrentContainers: number;
   maxConcurrentHostProcesses: number;
+  defaultWorkspaceExecutionMode: 'host' | 'container';
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   maxConcurrentScripts: number;
@@ -3461,6 +3463,8 @@ export interface SystemSettings {
   defaultLlmProvider: 'claude' | 'openai';
   defaultClaudeModel: string;
   defaultCodexModel: string;
+  defaultClaudeThinkingEffort: ThinkingEffort | '';
+  defaultCodexThinkingEffort: ThinkingEffort | '';
   // Provider-level extensible endpoints (usage + SDK)
   claudeUsageApiUrl: string;
   codexUsageApiUrl: string;
@@ -3666,6 +3670,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   containerMaxOutputSize: 10485760,
   maxConcurrentContainers: 20,
   maxConcurrentHostProcesses: 5,
+  defaultWorkspaceExecutionMode: 'container',
   maxLoginAttempts: 5,
   loginLockoutMinutes: 15,
   maxConcurrentScripts: 10,
@@ -3693,11 +3698,53 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   defaultLlmProvider: 'claude',
   defaultClaudeModel: '',
   defaultCodexModel: '',
+  defaultClaudeThinkingEffort: '',
+  defaultCodexThinkingEffort: '',
   claudeUsageApiUrl: 'https://api.anthropic.com/api/oauth/usage',
   codexUsageApiUrl: '',
   claudeSdkBaseUrl: '',
   codexSdkBaseUrl: '',
 };
+
+function normalizeWorkspaceExecutionMode(
+  value: unknown,
+  fallback: 'host' | 'container' = 'container',
+): 'host' | 'container' {
+  return value === 'host' ? 'host' : value === 'container' ? 'container' : fallback;
+}
+
+function normalizeThinkingEffort(
+  value: unknown,
+  fallback: ThinkingEffort | '' = '',
+): ThinkingEffort | '' {
+  return value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh'
+    ? value
+    : fallback;
+}
+
+export function resolveDefaultWorkspaceExecutionMode(options: {
+  configuredMode?: 'host' | 'container';
+  dockerAvailable?: boolean;
+  allowHost: boolean;
+}): 'host' | 'container' {
+  let mode = normalizeWorkspaceExecutionMode(
+    options.configuredMode,
+    DEFAULT_SYSTEM_SETTINGS.defaultWorkspaceExecutionMode,
+  );
+
+  if (mode === 'container' && options.dockerAvailable === false) {
+    mode = 'host';
+  }
+
+  if (mode === 'host' && !options.allowHost && options.dockerAvailable !== false) {
+    return 'container';
+  }
+
+  return mode;
+}
 
 function parseIntEnv(envVar: string | undefined, fallback: number): number {
   if (!envVar) return fallback;
@@ -3744,6 +3791,10 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       raw.maxConcurrentHostProcesses > 0
         ? raw.maxConcurrentHostProcesses
         : DEFAULT_SYSTEM_SETTINGS.maxConcurrentHostProcesses,
+    defaultWorkspaceExecutionMode: normalizeWorkspaceExecutionMode(
+      raw.defaultWorkspaceExecutionMode,
+      DEFAULT_SYSTEM_SETTINGS.defaultWorkspaceExecutionMode,
+    ),
     maxLoginAttempts:
       typeof raw.maxLoginAttempts === 'number' && raw.maxLoginAttempts > 0
         ? raw.maxLoginAttempts
@@ -3845,6 +3896,14 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.defaultCodexModel === 'string'
         ? raw.defaultCodexModel.trim()
         : DEFAULT_SYSTEM_SETTINGS.defaultCodexModel,
+    defaultClaudeThinkingEffort: normalizeThinkingEffort(
+      raw.defaultClaudeThinkingEffort,
+      DEFAULT_SYSTEM_SETTINGS.defaultClaudeThinkingEffort,
+    ),
+    defaultCodexThinkingEffort: normalizeThinkingEffort(
+      raw.defaultCodexThinkingEffort,
+      DEFAULT_SYSTEM_SETTINGS.defaultCodexThinkingEffort,
+    ),
     claudeUsageApiUrl:
       typeof raw.claudeUsageApiUrl === 'string'
         ? raw.claudeUsageApiUrl.trim()
@@ -3885,6 +3944,10 @@ function buildEnvFallbackSettings(): SystemSettings {
     maxConcurrentHostProcesses: parseIntEnv(
       process.env.MAX_CONCURRENT_HOST_PROCESSES,
       DEFAULT_SYSTEM_SETTINGS.maxConcurrentHostProcesses,
+    ),
+    defaultWorkspaceExecutionMode: normalizeWorkspaceExecutionMode(
+      process.env.DEFAULT_WORKSPACE_EXECUTION_MODE,
+      DEFAULT_SYSTEM_SETTINGS.defaultWorkspaceExecutionMode,
     ),
     maxLoginAttempts: parseIntEnv(
       process.env.MAX_LOGIN_ATTEMPTS,
@@ -3966,6 +4029,14 @@ function buildEnvFallbackSettings(): SystemSettings {
     defaultClaudeModel: process.env.DEFAULT_CLAUDE_MODEL || DEFAULT_SYSTEM_SETTINGS.defaultClaudeModel,
     defaultCodexModel:
       process.env.DEFAULT_CODEX_MODEL || DEFAULT_SYSTEM_SETTINGS.defaultCodexModel,
+    defaultClaudeThinkingEffort: normalizeThinkingEffort(
+      process.env.DEFAULT_CLAUDE_THINKING_EFFORT,
+      DEFAULT_SYSTEM_SETTINGS.defaultClaudeThinkingEffort,
+    ),
+    defaultCodexThinkingEffort: normalizeThinkingEffort(
+      process.env.DEFAULT_CODEX_THINKING_EFFORT,
+      DEFAULT_SYSTEM_SETTINGS.defaultCodexThinkingEffort,
+    ),
     claudeUsageApiUrl:
       process.env.CLAUDE_USAGE_API_URL || DEFAULT_SYSTEM_SETTINGS.claudeUsageApiUrl,
     codexUsageApiUrl:
@@ -4038,6 +4109,10 @@ export function saveSystemSettings(
     merged.maxConcurrentHostProcesses = 1;
   if (merged.maxConcurrentHostProcesses > 50)
     merged.maxConcurrentHostProcesses = 50;
+  merged.defaultWorkspaceExecutionMode = normalizeWorkspaceExecutionMode(
+    merged.defaultWorkspaceExecutionMode,
+    DEFAULT_SYSTEM_SETTINGS.defaultWorkspaceExecutionMode,
+  );
   if (merged.maxLoginAttempts < 1) merged.maxLoginAttempts = 1;
   if (merged.maxLoginAttempts > 100) merged.maxLoginAttempts = 100;
   if (merged.loginLockoutMinutes < 1) merged.loginLockoutMinutes = 1;
@@ -4088,6 +4163,12 @@ export function saveSystemSettings(
     merged.defaultLlmProvider === 'openai' ? 'openai' : 'claude';
   merged.defaultClaudeModel = (merged.defaultClaudeModel || '').trim();
   merged.defaultCodexModel = (merged.defaultCodexModel || '').trim();
+  merged.defaultClaudeThinkingEffort = normalizeThinkingEffort(
+    merged.defaultClaudeThinkingEffort,
+  );
+  merged.defaultCodexThinkingEffort = normalizeThinkingEffort(
+    merged.defaultCodexThinkingEffort,
+  );
   // Feishu domains: strip protocol prefix and trailing slash
   for (const key of ['feishuApiDomain', 'feishuDocDomain'] as const) {
     if (typeof merged[key] === 'string') {
