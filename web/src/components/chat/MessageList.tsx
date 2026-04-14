@@ -4,6 +4,7 @@ import { Message, useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageBubble } from './MessageBubble';
 import { StreamingDisplay } from './StreamingDisplay';
+import { getVisibleMessages } from './message-visibility';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { Loader2, ChevronUp, ChevronDown, AlertTriangle, Square, Code2, Zap, BookOpen, Wrench } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
@@ -46,6 +47,10 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   const thinkingCache = useChatStore(s => s.thinkingCache ?? {});
   const blocksCache = useChatStore(s => s.blocksCache ?? {});
   const isShared = useChatStore(s => !!s.groups[groupJid ?? '']?.is_shared);
+  const visibleMessages = useMemo(
+    () => getVisibleMessages(messages),
+    [messages],
+  );
   // Spawn agents: selector returns stable reference (the agents array itself),
   // then useMemo filters for spawn kind. Direct .filter() in selector causes
   // infinite re-render because Zustand sees a new array reference every time.
@@ -64,11 +69,11 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   const scrollStateRef = useRef({ autoScroll: true, atTop: false });
   const [autoScroll, setAutoScroll] = useState(true);
   const [atTop, setAtTop] = useState(false);
-  const prevMessageCount = useRef(messages.length);
+  const prevMessageCount = useRef(visibleMessages.length);
 
   // Compute flatMessages (with date headers) before virtualizer
   const flatMessages = useMemo<FlatItem[]>(() => {
-    const grouped = messages.reduce((acc, msg) => {
+    const grouped = visibleMessages.reduce((acc, msg) => {
       const date = new Date(msg.timestamp).toLocaleDateString('zh-CN', {
         year: 'numeric',
         month: 'long',
@@ -104,7 +109,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
       });
     });
     return items;
-  }, [messages]);
+  }, [visibleMessages]);
 
   // Chat always starts at bottom — no scroll position restoration.
   // key={...} on <MessageList> guarantees a fresh mount on group/tab switch.
@@ -179,13 +184,13 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
 
   // 新消息自动滚到底部
   useEffect(() => {
-    if (autoScroll && messages.length > prevMessageCount.current) {
+    if (autoScroll && visibleMessages.length > prevMessageCount.current) {
       requestAnimationFrame(() => {
         parentRef.current?.scrollTo({ top: parentRef.current.scrollHeight, behavior: 'smooth' });
       });
     }
-    prevMessageCount.current = messages.length;
-  }, [messages.length, autoScroll]);
+    prevMessageCount.current = visibleMessages.length;
+  }, [visibleMessages.length, autoScroll]);
 
   // 外部触发滚到底部（发送消息后）
   useEffect(() => {
@@ -203,7 +208,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
   useLayoutEffect(() => {
     if (!initialScrollDone.current && flatMessages.length > 0) {
       initialScrollDone.current = true;
-      prevMessageCount.current = messages.length;
+      prevMessageCount.current = visibleMessages.length;
       virtualizer.scrollToIndex(flatMessages.length - 1, { align: 'end' });
       if (parentRef.current) {
         parentRef.current.scrollTop = parentRef.current.scrollHeight;
@@ -222,7 +227,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
       correct(0);
       return () => cancelAnimationFrame(handle);
     }
-  }, [flatMessages.length, virtualizer, messages.length]);
+  }, [flatMessages.length, virtualizer, visibleMessages.length]);
 
   // Safety net: initialOffset relies on estimated sizes which may be inaccurate.
   // After mount (or when messages load asynchronously), verify we're actually at
@@ -268,7 +273,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
     parent.scrollTo({ top: parent.scrollHeight, behavior: 'smooth' });
   }, []);
 
-  const showScrollButtons = messages.length > 0;
+  const showScrollButtons = visibleMessages.length > 0;
 
   return (
     <div className="relative flex-1 overflow-hidden overflow-x-hidden">
@@ -416,7 +421,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
           })}
         </div>
 
-        {messages.length === 0 && !loading && (
+        {visibleMessages.length === 0 && !loading && (
           <div className="absolute inset-0 flex flex-col items-center justify-center px-6">
             <div className="max-w-lg w-full space-y-8">
               {/* Welcome header */}

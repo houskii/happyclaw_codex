@@ -30,7 +30,8 @@ export class MessagingPlugin implements ContextPlugin {
           "Send a message to an IM channel (Feishu/Telegram/QQ) or Web UI. "
           + "Your stdout only appears in Web UI and is never sent to IM. To reach IM users, you MUST call this tool with the channel parameter (from the message's source attribute, e.g. 'feishu:oc_xxx', 'telegram:123'). "
           + 'IMPORTANT: IM users cannot see your streaming output, tool calls, or thinking process — from their perspective, you are silent until you explicitly send_message. '
-          + "When handling a request that takes time (research, coding, file operations, etc.), send a brief acknowledgment FIRST (e.g. '我看看哦', 'let me check'), then do your work, then send the result. Do not make the user wait in silence.",
+          + "When handling a request that takes time (research, coding, file operations, etc.), send a brief acknowledgment FIRST (e.g. '我看看哦', 'let me check'), then do your work, then send the result. Do not make the user wait in silence. "
+          + "Use intent='ack' for short progress updates, and intent='final' only when this message itself is the final answer for the user. If you send intent='final', do NOT repeat the same conclusion again in stdout, and do NOT output routing narration like '我已经在飞书里回了'.",
         parameters: {
           type: 'object',
           properties: {
@@ -48,11 +49,18 @@ export class MessagingPlugin implements ContextPlugin {
               type: 'string',
               description: 'Reply to a specific message by its ID (from the message id attribute).',
             },
+            intent: {
+              type: 'string',
+              description:
+                "Optional delivery intent. Use 'ack' for a short in-progress acknowledgement, and 'final' when this send_message already contains the final answer. If omitted, the host preserves legacy behavior.",
+              enum: ['ack', 'final'],
+            },
           },
           required: ['text'],
         },
         execute: async (args: Record<string, unknown>) => {
           const text = getOptionalStringArg(args, 'text');
+          const intent = getOptionalStringArg(args, 'intent');
           if (!text) {
             return { content: 'Error: text is required.', isError: true };
           }
@@ -64,6 +72,7 @@ export class MessagingPlugin implements ContextPlugin {
             targetChannel: getOptionalStringArg(args, 'channel'),
             urgent: typeof args.urgent === 'boolean' ? args.urgent : false,
             replyToMsgId: getOptionalStringArg(args, 'reply_to_message_id'),
+            intent: intent === 'ack' || intent === 'final' ? intent : undefined,
             groupFolder: ctx.groupFolder,
             timestamp: new Date().toISOString(),
           });

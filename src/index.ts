@@ -502,6 +502,42 @@ const activeRouteUpdaters = new Map<string, ReplyRouteUpdater>();
 // outputs to the correct IM channel (the running session holds the truth).
 const activeImReplyRoutes = new Map<string, string | null>();
 
+type SendMessageIntent = 'ack' | 'final';
+
+interface PendingCanonicalFinal {
+  messageId?: string;
+  createdAt: number;
+}
+
+const PENDING_CANONICAL_FINAL_TTL_MS = 30_000;
+const pendingCanonicalFinals = new Map<string, PendingCanonicalFinal>();
+
+function setPendingCanonicalFinal(
+  chatJid: string,
+  messageId?: string,
+): void {
+  pendingCanonicalFinals.set(chatJid, {
+    messageId,
+    createdAt: Date.now(),
+  });
+}
+
+function clearPendingCanonicalFinal(chatJid: string): void {
+  pendingCanonicalFinals.delete(chatJid);
+}
+
+function consumePendingCanonicalFinal(
+  chatJid: string,
+): PendingCanonicalFinal | null {
+  const pending = pendingCanonicalFinals.get(chatJid);
+  if (!pending) return null;
+  pendingCanonicalFinals.delete(chatJid);
+  if (Date.now() - pending.createdAt > PENDING_CANONICAL_FINAL_TTL_MS) {
+    return null;
+  }
+  return pending;
+}
+
 // IPC delivery watchdog: track piped messages awaiting agent acknowledgement.
 // agent-runner emits a status stream_event "ipc_message_received" once an
 // injected IPC message has been consumed. If no ack arrives within
@@ -2851,6 +2887,7 @@ export function collectMessageImages(
  * rapid-fire messages to be piped in without spawning a new container.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
+  clearPendingCanonicalFinal(chatJid);
   let group = registeredGroups[chatJid];
   if (!group) {
     // Group may have been created after loadState (e.g., during setup/registration)
@@ -3144,6 +3181,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               result.streamEvent.statusText === 'ipc_message_received'
             ) {
               ackIpcDelivery(chatJid);
+              clearPendingCanonicalFinal(chatJid);
             }
 
             // ── 累积 text_delta / thinking_delta 文本（中断时用于保存已输出内容）──
@@ -3502,6 +3540,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               `Agent output: ${raw.slice(0, 200)}`,
             );
             if (text) {
+              const pendingCanonicalFinal =
+                (!result.sourceKind || result.sourceKind === 'sdk_final')
+                  ? consumePendingCanonicalFinal(chatJid)
+                  : null;
+              if (pendingCanonicalFinal) {
+                logger.info(
+                  { chatJid, sourceKind: result.sourceKind || 'sdk_final' },
+                  'Suppressed duplicate sdk_final after send_message(intent=final)',
+                );
+                lastReplyMsgId = pendingCanonicalFinal.messageId;
+                sentReply = true;
+                clearStreamingSnapshot(chatJid);
+                streamingAccumulatedText = '';
+                streamingAccumulatedThinking = '';
+                commitCursor();
+                if (streamingSession?.isActive()) {
+                  await streamingSession
+                    .abort('回复已通过消息发送')
+                    .catch(() => {});
+                }
+                resetIdleTimer();
+                return;
+              }
+
               // Stop typing indicator before sending — clears the 4s refresh timer
               // so it doesn't keep firing while the agent stays alive in idle state.
               await setTyping(chatJid, false);
@@ -3663,6 +3725,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
   } finally {
     await setTyping(chatJid, false);
+    if (!sentReply) {
+      const pendingCanonicalFinal = consumePendingCanonicalFinal(chatJid);
+      if (pendingCanonicalFinal) {
+        lastReplyMsgId = pendingCanonicalFinal.messageId;
+        sentReply = true;
+        commitCursor();
+        if (streamingSession?.isActive()) {
+          await streamingSession
+            .abort('回复已通过消息发送')
+            .catch(() => {});
+        }
+      }
+    }
     // Always clear ack reaction in finally — covers error/interrupt/abort paths
     // where the normal sendMessage (which clears it) is never called.
     imManager.clearAckReaction(chatJid);
@@ -4679,6 +4754,10 @@ function startIpcWatcher(): void {
             const raw = await fsp.readFile(filePath, 'utf-8');
             const data = JSON.parse(raw);
             if (data.type === 'message' && data.chatJid && data.text) {
+              const sendMessageIntent: SendMessageIntent | undefined =
+                data.intent === 'ack' || data.intent === 'final'
+                  ? data.intent
+                  : undefined;
               const targetGroup = registeredGroups[data.chatJid];
               if (
                 canSendCrossGroupMessage(
@@ -4697,11 +4776,14 @@ function startIpcWatcher(): void {
                 // Feishu card JSON: store extracted markdown for web, send raw JSON to IM
                 const cardText = extractFeishuCardText(data.text);
                 const webText = cardText || data.text;
-                await sendMessage(effectiveChatJid, webText, {
+                const persistedMsgId = await sendMessage(effectiveChatJid, webText, {
                   messageMeta: {
                     sourceKind: 'sdk_send_message',
                   },
                 });
+                if (sendMessageIntent === 'final') {
+                  setPendingCanonicalFinal(effectiveChatJid, persistedMsgId);
+                }
 
                 // Forward to IM channel — but NOT for conversation agent messages.
                 // Conversation agents handle their own IM routing in
@@ -5561,6 +5643,7 @@ async function processAgentConversation(
   const { effectiveGroup } = resolveEffectiveGroup(group);
 
   const virtualChatJid = `${chatJid}#agent:${agentId}`;
+  clearPendingCanonicalFinal(virtualChatJid);
   const virtualJid = virtualChatJid; // used as queue key
 
   // Get pending messages
@@ -5704,6 +5787,13 @@ async function processAgentConversation(
     // Stream events
     if (output.status === 'stream' && output.streamEvent) {
       broadcastStreamEvent(chatJid, output.streamEvent, agentId);
+
+      if (
+        output.streamEvent.eventType === 'status' &&
+        output.streamEvent.statusText === 'ipc_message_received'
+      ) {
+        clearPendingCanonicalFinal(virtualChatJid);
+      }
 
       // ── 累积 text_delta 文本（中断时用于保存已输出内容）──
       if (
@@ -5854,6 +5944,27 @@ async function processAgentConversation(
         return;
       }
       if (text) {
+        const pendingCanonicalFinal =
+          (!output.sourceKind || output.sourceKind === 'sdk_final')
+            ? consumePendingCanonicalFinal(virtualChatJid)
+            : null;
+        if (pendingCanonicalFinal) {
+          logger.info(
+            { chatJid, agentId, sourceKind: output.sourceKind || 'sdk_final' },
+            'Suppressed duplicate sdk_final after send_message(intent=final) in conversation agent',
+          );
+          lastAgentReplyMsgId = pendingCanonicalFinal.messageId;
+          lastAgentReplyText = text;
+          commitCursor();
+          resetIdleTimer();
+          if (agentStreamingSession?.isActive()) {
+            await agentStreamingSession
+              .abort('回复已通过消息发送')
+              .catch(() => {});
+          }
+          return;
+        }
+
         const isFirstReply = !lastAgentReplyMsgId;
         const msgId = crypto.randomUUID();
         lastAgentReplyMsgId = msgId;
@@ -6144,6 +6255,18 @@ async function processAgentConversation(
     logger.error({ agentId, chatJid, err }, 'Agent conversation error');
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
+    if (!cursorCommitted) {
+      const pendingCanonicalFinal = consumePendingCanonicalFinal(virtualChatJid);
+      if (pendingCanonicalFinal) {
+        lastAgentReplyMsgId = pendingCanonicalFinal.messageId;
+        commitCursor();
+        if (agentStreamingSession?.isActive()) {
+          await agentStreamingSession
+            .abort('回复已通过消息发送')
+            .catch(() => {});
+        }
+      }
+    }
 
     const wasInterrupted = agentStreamInterrupted && !cursorCommitted;
 

@@ -73,15 +73,17 @@ function buildChannelRoutingSection(recentImChannels?: Set<string>): string {
     '',
     '- **你的文字输出（stdout）仅显示在 Web 界面**，不会自动发送到任何 IM 渠道。',
     '- 要向 IM 渠道发送消息，**必须**使用 `send_message` 工具并指定 `channel` 参数（值取自消息的 `source` 属性）。',
+    "- `send_message(intent='ack')` 用于简短进度确认；`send_message(intent='final')` 只用于这条消息本身已经包含最终结论的情况。",
     '- 发送图片/文件到 IM 时，`send_image` / `send_file` 的 `channel` 参数为必填。',
     '- 如果所有消息都来自 Web（没有 source 属性），正常回复即可，无需调用 send_message。',
     '- 同一批消息可能来自不同渠道，根据需要分别回复。',
+    "- 如果你已经通过 `send_message(intent='final', channel='...')` 发出了最终结论，就不要再用 stdout 重复同样的结论，也不要输出“我已经在飞书/群里回了”之类的路由说明。",
     '- **上下文压缩后**：之前的渠道上下文可能丢失，但 `source` 属性仍然存在于每条消息中。压缩后请务必检查最新消息的 `source` 属性，确保通过 `send_message` 回复 IM 用户。',
     ...(recentImChannels && recentImChannels.size > 0
       ? [
           '',
           `**活跃 IM 渠道**：你近期与以下渠道有活跃对话：${[...recentImChannels].join('、')}。`,
-          '完成任务后，务必通过 `send_message(channel="渠道值")` 主动向这些渠道的用户汇报结果。',
+          '完成任务后，务必通过 `send_message(intent="final", channel="渠道值")` 主动向这些渠道的用户汇报结果。',
         ]
       : []),
   ].join('\n');
