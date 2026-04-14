@@ -822,19 +822,115 @@ export function createFeishuConnection(
   async function sendTextToChat(chatId: string, text: string): Promise<void> {
     if (!client) return;
     try {
-      const receive_id_type = chatId.startsWith('oc_')
-        ? 'chat_id'
-        : 'open_id';
-      await client.im.v1.message.create({
-        params: { receive_id_type },
-        data: {
-          receive_id: chatId,
-          msg_type: 'text',
-          content: JSON.stringify({ text }),
-        },
-      });
+      await sendRichMessageToChat(client, chatId, text);
     } catch (err) {
       logger.error({ chatId, err }, 'Failed to send Feishu text reply');
+    }
+  }
+
+  async function sendRichMessageToChat(
+    feishuClient: lark.Client,
+    chatId: string,
+    msgText: string,
+  ): Promise<void> {
+    // Detect pre-built Feishu interactive card JSON — send directly without wrapping
+    if (msgText.startsWith('{"type":"interactive"')) {
+      try {
+        const parsed = JSON.parse(msgText);
+        if (parsed.type === 'interactive' && parsed.card) {
+          const lastMsgId = lastMessageIdByChat.get(chatId);
+          if (lastMsgId) {
+            await feishuClient.im.message.reply({
+              path: { message_id: lastMsgId },
+              data: { content: msgText, msg_type: 'interactive' },
+            });
+          } else {
+            await feishuClient.im.v1.message.create({
+              params: { receive_id_type: 'chat_id' },
+              data: {
+                receive_id: chatId,
+                msg_type: 'interactive',
+                content: msgText,
+              },
+            });
+          }
+          return;
+        }
+      } catch {
+        // Not valid card JSON, fall through to normal handling
+      }
+    }
+
+    // Count markdown tables to decide format upfront — Feishu cards have a table limit
+    const tableCount = (msgText.match(/^\|[\s:-]+\|/gm) || []).length;
+    const usePostMd = tableCount > CARD_TABLE_LIMIT;
+    const lastMsgId = lastMessageIdByChat.get(chatId);
+
+    if (usePostMd) {
+      const postContent = buildPostMdFallback(msgText);
+      if (lastMsgId) {
+        await feishuClient.im.message.reply({
+          path: { message_id: lastMsgId },
+          data: { content: postContent, msg_type: 'post' },
+        });
+      } else {
+        await feishuClient.im.v1.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: 'post',
+            content: postContent,
+          },
+        });
+      }
+      return;
+    }
+
+    const card = buildInteractiveCard(msgText);
+    const content = JSON.stringify(card);
+    if (lastMsgId) {
+      try {
+        await feishuClient.im.message.reply({
+          path: { message_id: lastMsgId },
+          data: { content, msg_type: 'interactive' },
+        });
+      } catch (err) {
+        logger.warn(
+          { err, chatId },
+          'Feishu interactive reply failed, fallback to post+md',
+        );
+        await feishuClient.im.message.reply({
+          path: { message_id: lastMsgId },
+          data: {
+            content: buildPostMdFallback(msgText),
+            msg_type: 'post',
+          },
+        });
+      }
+    } else {
+      try {
+        await feishuClient.im.v1.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: 'interactive',
+            content,
+          },
+        });
+      } catch (err) {
+        logger.warn(
+          { err, chatId },
+          'Feishu interactive create failed, fallback to post+md',
+        );
+        await feishuClient.im.v1.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: 'post',
+            content: buildPostMdFallback(msgText),
+          },
+        });
+      }
     }
   }
 
@@ -1573,113 +1669,8 @@ export function createFeishuConnection(
       };
 
       try {
-        const sendMsg = async (msgText: string) => {
-          // Detect pre-built Feishu interactive card JSON — send directly without wrapping
-          if (msgText.startsWith('{"type":"interactive"')) {
-            try {
-              const parsed = JSON.parse(msgText);
-              if (parsed.type === 'interactive' && parsed.card) {
-                const lastMsgId = lastMessageIdByChat.get(chatId);
-                if (lastMsgId) {
-                  await feishuClient.im.message.reply({
-                    path: { message_id: lastMsgId },
-                    data: { content: msgText, msg_type: 'interactive' },
-                  });
-                } else {
-                  await feishuClient.im.v1.message.create({
-                    params: { receive_id_type: 'chat_id' },
-                    data: {
-                      receive_id: chatId,
-                      msg_type: 'interactive',
-                      content: msgText,
-                    },
-                  });
-                }
-                return;
-              }
-            } catch {
-              // Not valid card JSON, fall through to normal handling
-            }
-          }
-
-          // Count markdown tables to decide format upfront — Feishu cards have a table limit
-          // Each table has exactly one separator row (e.g. |---|---|), so counting those = table count
-          const tableCount = (msgText.match(/^\|[\s:-]+\|/gm) || []).length;
-          const usePostMd = tableCount > CARD_TABLE_LIMIT;
-
-          if (usePostMd) {
-            // Too many tables for card format, go directly to post+md
-            const postContent = buildPostMdFallback(msgText);
-            const lastMsgId = lastMessageIdByChat.get(chatId);
-            if (lastMsgId) {
-              await feishuClient.im.message.reply({
-                path: { message_id: lastMsgId },
-                data: { content: postContent, msg_type: 'post' },
-              });
-            } else {
-              await feishuClient.im.v1.message.create({
-                params: { receive_id_type: 'chat_id' },
-                data: {
-                  receive_id: chatId,
-                  msg_type: 'post',
-                  content: postContent,
-                },
-              });
-            }
-            return;
-          }
-
-          const card = buildInteractiveCard(msgText);
-          const content = JSON.stringify(card);
-          const lastMsgId = lastMessageIdByChat.get(chatId);
-          if (lastMsgId) {
-            try {
-              await feishuClient.im.message.reply({
-                path: { message_id: lastMsgId },
-                data: { content, msg_type: 'interactive' },
-              });
-            } catch (err) {
-              logger.warn(
-                { err, chatId },
-                'Feishu interactive reply failed, fallback to post+md',
-              );
-              await feishuClient.im.message.reply({
-                path: { message_id: lastMsgId },
-                data: {
-                  content: buildPostMdFallback(msgText),
-                  msg_type: 'post',
-                },
-              });
-            }
-          } else {
-            try {
-              await feishuClient.im.v1.message.create({
-                params: { receive_id_type: 'chat_id' },
-                data: {
-                  receive_id: chatId,
-                  msg_type: 'interactive',
-                  content,
-                },
-              });
-            } catch (err) {
-              logger.warn(
-                { err, chatId },
-                'Feishu interactive create failed, fallback to post+md',
-              );
-              await feishuClient.im.v1.message.create({
-                params: { receive_id_type: 'chat_id' },
-                data: {
-                  receive_id: chatId,
-                  msg_type: 'post',
-                  content: buildPostMdFallback(msgText),
-                },
-              });
-            }
-          }
-        };
-
         try {
-          await sendMsg(text);
+          await sendRichMessageToChat(feishuClient, chatId, text);
         } catch (outerErr: any) {
           const feishuCode = outerErr?.response?.data?.code;
           if (feishuCode === 230028) {
@@ -1692,7 +1683,9 @@ export function createFeishuConnection(
                 /([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g,
                 '$1\uFF20$2',
               );
-              await sendMsg(
+              await sendRichMessageToChat(
+                feishuClient,
+                chatId,
                 `${sanitized}\n\n> ⚠️ 消息中的 @ 已被替换为全角＠以通过飞书安全审计，请注意复制时替换回半角 @`,
               );
             } catch (retryErr) {

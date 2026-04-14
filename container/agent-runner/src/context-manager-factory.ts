@@ -12,6 +12,7 @@ import {
   GroupsPlugin,
   MemoryPlugin,
   SkillsPlugin,
+  AppContextPlugin,
   type PluginContext,
 } from 'happyclaw-agent-runner-core';
 import { InvokeAgentPlugin } from './plugins/invoke-agent-plugin.js';
@@ -59,6 +60,9 @@ export function createContextManager(
   if (options?.includeSkills) {
     ctxMgr.register(new SkillsPlugin());
   }
+
+  // ── App-imported context search (only enabled in bound workspaces) ──
+  ctxMgr.register(new AppContextPlugin());
 
   // ── Memory (requires userId to be meaningful) ──
   if (ctx.userId) {

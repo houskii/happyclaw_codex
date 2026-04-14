@@ -11,6 +11,12 @@ export interface SystemStatus {
   uptime: number;
   dockerImageExists: boolean;
   dockerBuildInProgress?: boolean;
+  systemVersions?: {
+    claudeCode: { host: string | null; container: string | null; latest: string | null };
+    claudeAgentSdk: { host: string | null; container: string | null; latest: string | null };
+    codexCli: { host: string | null; container: string | null; latest: string | null };
+    codexSdk: { host: string | null; container: string | null; latest: string | null };
+  } | null;
   agentRuntimeVersions?: { host: string | null; container: string | null; latest: string | null } | null;
   claudeCodeVersions?: { host: string | null; container: string | null; latest: string | null } | null;
   dockerBuildLogs?: string[];

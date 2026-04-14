@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'child_process';
+import { readFile } from 'fs/promises';
 import path from 'path';
 import readline from 'readline';
 import { promisify } from 'util';
@@ -28,46 +29,83 @@ interface VersionInfo {
   latest: string | null;
 }
 
+interface SystemVersionInfo {
+  claudeCode: VersionInfo;
+  claudeAgentSdk: VersionInfo;
+  codexCli: VersionInfo;
+  codexSdk: VersionInfo;
+}
+
 let cachedVersions: {
-  info: VersionInfo;
+  info: SystemVersionInfo;
   fetchedAt: number;
   imageId: string | null;
 } | null = null;
 const VERSION_CACHE_TTL = 60 * 60 * 1000;
 
 // Latest version cache (separate TTL, queried from npm registry)
-let cachedLatestVersion: { version: string | null; fetchedAt: number } | null =
-  null;
+const cachedLatestVersions = new Map<
+  string,
+  { version: string | null; fetchedAt: number }
+>();
 const LATEST_VERSION_CACHE_TTL = 30 * 60 * 1000; // 30min
 
-/** Query latest agent runtime SDK version from npm registry */
-async function getLatestAgentRuntimeVersion(): Promise<string | null> {
+/** Query latest package version from npm registry */
+async function getLatestPackageVersion(packageName: string): Promise<string | null> {
   const now = Date.now();
-  if (
-    cachedLatestVersion &&
-    now - cachedLatestVersion.fetchedAt < LATEST_VERSION_CACHE_TTL
-  ) {
-    return cachedLatestVersion.version;
+  const cached = cachedLatestVersions.get(packageName);
+  if (cached && now - cached.fetchedAt < LATEST_VERSION_CACHE_TTL) {
+    return cached.version;
   }
 
   try {
     const { stdout } = await execFileAsync(
       'npm',
-      ['view', '@anthropic-ai/claude-code', 'version'],
+      ['view', packageName, 'version'],
       { timeout: 15000 },
     );
     const version = stdout.trim() || null;
-    cachedLatestVersion = { version, fetchedAt: now };
+    cachedLatestVersions.set(packageName, { version, fetchedAt: now });
     return version;
   } catch {
     // Fallback: keep stale cache if available
-    if (cachedLatestVersion) return cachedLatestVersion.version;
-    cachedLatestVersion = { version: null, fetchedAt: now };
+    if (cached) return cached.version;
+    cachedLatestVersions.set(packageName, { version: null, fetchedAt: now });
     return null;
   }
 }
 
-/** Get host agent runtime version by running SDK's built-in cli.js --version */
+async function getHostPackageVersion(packageJsonPath: string): Promise<string | null> {
+  try {
+    const raw = await readFile(packageJsonPath, 'utf-8');
+    const parsed = JSON.parse(raw) as { version?: string };
+    return parsed.version?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getContainerPackageVersion(
+  packageJsonPath: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'docker',
+      [
+        'run', '--rm', '--entrypoint', 'node',
+        CONTAINER_IMAGE,
+        '-e',
+        `console.log(require('${packageJsonPath}').version)`,
+      ],
+      { timeout: 30000 },
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Get host Claude Code runtime version by running SDK's built-in cli.js --version */
 async function getHostAgentRuntimeVersion(): Promise<string | null> {
   try {
     const cliPath = path.resolve(
@@ -79,6 +117,17 @@ async function getHostAgentRuntimeVersion(): Promise<string | null> {
       ['-e', `process.argv = ['node', 'claude', '--version']; require('${cliPath}')`],
       { timeout: 10000 },
     );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getHostCodexCliVersion(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('codex', ['--version'], {
+      timeout: 10000,
+    });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -98,7 +147,7 @@ async function getDockerImageId(): Promise<string | null> {
   }
 }
 
-/** Get container agent runtime version from SDK's cli.js inside Docker image */
+/** Get container Claude Code runtime version from SDK's cli.js inside Docker image */
 async function getContainerAgentRuntimeVersion(): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -116,7 +165,25 @@ async function getContainerAgentRuntimeVersion(): Promise<string | null> {
   }
 }
 
-async function getAgentRuntimeVersions(): Promise<VersionInfo> {
+async function getContainerCodexCliVersion(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'docker',
+      [
+        'run', '--rm', '--entrypoint', 'node',
+        CONTAINER_IMAGE,
+        '-e',
+        `console.log(require('/app/node_modules/@openai/codex/package.json').version)`,
+      ],
+      { timeout: 30000 },
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getSystemVersionInfo(): Promise<SystemVersionInfo> {
   const now = Date.now();
   const imageId = await getDockerImageId();
 
@@ -129,13 +196,71 @@ async function getAgentRuntimeVersions(): Promise<VersionInfo> {
     return cachedVersions.info;
   }
 
-  // Fetch all versions concurrently
-  const [host, container, latest] = await Promise.all([
+  const [
+    claudeCodeHost,
+    claudeCodeContainer,
+    claudeCodeLatest,
+    claudeSdkHost,
+    claudeSdkContainer,
+    claudeSdkLatest,
+    codexCliHost,
+    codexCliContainer,
+    codexCliLatest,
+    codexSdkHost,
+    codexSdkContainer,
+    codexSdkLatest,
+  ] = await Promise.all([
     getHostAgentRuntimeVersion(),
     imageId ? getContainerAgentRuntimeVersion() : Promise.resolve(null),
-    getLatestAgentRuntimeVersion(),
+    getLatestPackageVersion('@anthropic-ai/claude-code'),
+    getHostPackageVersion(
+      path.resolve(
+        process.cwd(),
+        'container/agent-runner/node_modules/@anthropic-ai/claude-agent-sdk/package.json',
+      ),
+    ),
+    imageId
+      ? getContainerPackageVersion(
+          '/app/node_modules/@anthropic-ai/claude-agent-sdk/package.json',
+        )
+      : Promise.resolve(null),
+    getLatestPackageVersion('@anthropic-ai/claude-agent-sdk'),
+    getHostCodexCliVersion(),
+    imageId ? getContainerCodexCliVersion() : Promise.resolve(null),
+    getLatestPackageVersion('@openai/codex'),
+    getHostPackageVersion(
+      path.resolve(
+        process.cwd(),
+        'container/agent-runner/node_modules/@openai/codex-sdk/package.json',
+      ),
+    ),
+    imageId
+      ? getContainerPackageVersion('/app/node_modules/@openai/codex-sdk/package.json')
+      : Promise.resolve(null),
+    getLatestPackageVersion('@openai/codex-sdk'),
   ]);
-  const info: VersionInfo = { host, container, latest };
+  const info: SystemVersionInfo = {
+    claudeCode: {
+      host: claudeCodeHost,
+      container: claudeCodeContainer,
+      latest: claudeCodeLatest,
+    },
+    claudeAgentSdk: {
+      host: claudeSdkHost,
+      container: claudeSdkContainer,
+      latest: claudeSdkLatest,
+    },
+    codexCli: {
+      host: codexCliHost,
+      container: codexCliContainer,
+      latest: codexCliLatest,
+    },
+    codexSdk: {
+      host: codexSdkHost,
+      container: codexSdkContainer,
+      latest: codexSdkLatest,
+    },
+  };
 
   cachedVersions = { info, fetchedAt: now, imageId };
   return info;
@@ -268,7 +393,7 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     }).length;
   }
 
-  const runtimeVersions = isAdmin ? await getAgentRuntimeVersions() : undefined;
+  const runtimeVersions = isAdmin ? await getSystemVersionInfo() : undefined;
 
   return c.json({
     activeContainers,
@@ -285,8 +410,9 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     groups: filteredGroups,
     dockerImageExists,
     dockerBuildInProgress: buildState.building,
-    agentRuntimeVersions: runtimeVersions,
-    claudeCodeVersions: runtimeVersions,
+    systemVersions: runtimeVersions,
+    agentRuntimeVersions: runtimeVersions?.claudeCode,
+    claudeCodeVersions: runtimeVersions?.claudeCode,
     dockerBuildLogs:
       isAdmin && buildState.building ? buildState.logs.slice(-50) : undefined,
     dockerBuildResult: isAdmin ? buildState.result : undefined,

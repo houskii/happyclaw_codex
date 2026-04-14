@@ -31,7 +31,10 @@ import {
 import {
   closeDatabase,
   createTask,
+  deleteChatHistory,
+  deleteGroupData,
   deleteExpiredSessions,
+  deleteRegisteredGroup,
   getExpiredSessionIds,
   deleteTask,
   ensureChatExists,
@@ -151,6 +154,7 @@ import {
   reconcileMonthlyUsage,
 } from './billing.js';
 import { getDefaultLlmBinding } from './llm-defaults.js';
+import { removeFlowArtifacts } from './file-manager.js';
 import {
   AgentStatus,
   MessageCursor,
@@ -162,6 +166,20 @@ import {
   WorkspaceLlmProvider,
 } from './types.js';
 import { logger } from './logger.js';
+import {
+  type AppBindingRecord,
+  type CodexRecentThread,
+  buildContextIndex,
+  buildHandoffSummary,
+  getCodexThreadById,
+  getThreadPreviewText,
+  listRecentCodexThreads,
+  readAppBinding,
+  readCodexThreadMessages,
+  syncResultBackToCodexThread,
+  writeAppBinding,
+  writeThreadSnapshotFiles,
+} from './codex-app-handoff.js';
 import {
   ensureAgentDirectories,
   isSystemMaintenanceNoise,
@@ -204,6 +222,12 @@ const DEFAULT_MAIN_JID = 'web:main';
 const DEFAULT_MAIN_NAME = 'Main';
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
 const OOM_EXIT_RE = /code 137/;
+const FROM_APP_SELECTION_TTL_MS = 10 * 60 * 1000;
+
+const pendingFromAppSelections = new Map<
+  string,
+  { createdAt: number; threads: CodexRecentThread[] }
+>();
 
 /**
  * Feed a stream event into a Feishu streaming card controller.
@@ -1125,6 +1149,10 @@ async function handleCommand(
       return handleBindCommand(chatJid, rawArgs);
     case 'new':
       return handleNewCommand(chatJid, rawArgs);
+    case 'fromapp':
+      return handleFromAppCommand(chatJid, rawArgs);
+    case 'toapp':
+      return handleToAppCommand(chatJid);
     case 'modify':
       return handleModifyCommand(chatJid, rawArgs);
     case 'require_mention':
@@ -1139,20 +1167,35 @@ async function handleCommand(
 
 function handleHelpCommand(): string {
   return (
-    '可用指令：\n' +
-    '/help — 查看指令说明\n' +
-    '/list — 查看所有工作区\n' +
-    '/status — 查看当前队列与运行状态\n' +
-    '/view — 查看当前绑定工作区与运行参数\n' +
-    '/bind <workspace> 或 /bind <workspace>/<agent短ID> — 绑定到已有工作区\n' +
-    '/unbind — 解绑回默认工作区\n' +
-    '/new <名称> [--provider claude|openai] [--mode container|host] [--workspace <目录>] — 新建工作区并绑定此群\n' +
-    '/new --help — 查看 /new 参数说明\n' +
-    '/modify [--provider claude|openai] [--mode container|host] [--workspace <目录>] [--model <模型>] [--thinking <强度>] [--claude-model <模型>] [--claude-thinking <强度>] [--codex-model <模型>] [--codex-thinking <强度>] [--env KEY=VALUE] [--unset-env KEY] — 修改当前工作区\n' +
-    '/modify --help — 查看 /modify 参数说明\n' +
-    '/clear — 清除当前会话上下文\n' +
-    '/recall — 总结最近对话\n' +
-    '/require_mention true|false — 设置群聊是否必须 @ 机器人才响应'
+    '# 🧭 HappyClaw 指令说明\n\n'
+    + '---\n\n'
+    + '## 📁 工作区\n\n'
+    + '- `/list`：查看所有工作区\n'
+    + '- `/status`：查看当前队列与运行状态\n'
+    + '- `/view`：查看当前绑定工作区与运行参数\n'
+    + '- `/bind <workspace>` 或 `/bind <workspace>/<agent短ID>`：绑定到已有工作区\n'
+    + '- `/unbind`：解绑回默认工作区\n'
+    + '- `/new <名称> ...`：新建工作区并绑定此群\n'
+    + '- `/new --help`：查看 `new` 的完整参数说明\n'
+    + '- `/modify`：修改当前工作区参数\n'
+    + '  发送 `/modify --help` 查看完整参数\n\n'
+    + '---\n\n'
+    + '## 🔀 Codex App 中转\n\n'
+    + '- `/fromapp`：查看 `Codex App` 最近活跃线程列表\n'
+    + '- `/fromapp <编号>`：导入选中的线程并创建绑定工作区\n'
+    + '- `/fromapp cancel`：取消当前待导入选择\n'
+    + '- `/toapp`：将当前绑定工作区结果回写到来源 `App` 线程并清理工作区\n\n'
+    + '> 使用方式：先发送 `/fromapp` 查看列表，再发送 `/fromapp <编号>` 继续对应线程。\n\n'
+    + '---\n\n'
+    + '## 🧠 会话\n\n'
+    + '- `/clear`：清除当前会话上下文\n'
+    + '- `/recall`：总结最近对话\n\n'
+    + '---\n\n'
+    + '## 👥 群聊\n\n'
+    + '- `/require_mention true|false`：设置群聊是否必须 `@` 机器人才响应\n\n'
+    + '---\n\n'
+    + '## ❓ 帮助\n\n'
+    + '- `/help`：查看本说明'
   );
 }
 
@@ -1244,6 +1287,45 @@ function formatNewCommandHelp(): string {
     '- --mode 可选，默认跟随系统参数；当默认是 host 但当前用户无权限时会自动回退到 container\n' +
     '- --workspace 仅在 host 模式下生效，表示宿主机工作目录（绝对路径）'
   );
+}
+
+function parseFromAppCommandArgs(rawArgs: string): {
+  selection?: number;
+  llmProvider?: 'claude' | 'openai';
+  cancel: boolean;
+  error?: string;
+} {
+  const tokens = tokenizeCommandArgs(rawArgs);
+  if (tokens.length === 0) return { cancel: false };
+
+  let selection: number | undefined;
+  let llmProvider: 'claude' | 'openai' | undefined;
+  let cancel = false;
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.toLowerCase() === 'cancel') {
+      cancel = true;
+      continue;
+    }
+    if (token === '--provider') {
+      const value = tokens[i + 1]?.toLowerCase();
+      if (!value) return { cancel: false, error: '缺少 --provider 的值' };
+      if (value !== 'claude' && value !== 'openai') {
+        return { cancel: false, error: 'Provider 仅支持 claude 或 openai' };
+      }
+      llmProvider = value;
+      i += 1;
+      continue;
+    }
+    if (/^\d+$/.test(token) && selection === undefined) {
+      selection = Number.parseInt(token, 10);
+      continue;
+    }
+    return { cancel: false, error: `未知参数: ${token}` };
+  }
+
+  return { selection, llmProvider, cancel };
 }
 
 function parseModifyCommandArgs(rawArgs: string): {
@@ -1909,6 +1991,8 @@ async function handleModifyCommand(
   if (hasRuntimeChanges) {
     const targetProvider: WorkspaceLlmProvider =
       parsed.llmProvider ?? existing.llm_provider ?? 'claude';
+    const providerChanged =
+      (existing.llm_provider ?? 'claude') !== targetProvider;
     const nextClaudeModel =
       parsed.claudeModel ??
       (parsed.model !== undefined && targetProvider === 'claude'
@@ -1949,6 +2033,10 @@ async function handleModifyCommand(
     };
     setRegisteredGroup(workspaceJid, updated);
     registeredGroups[workspaceJid] = getRegisteredGroup(workspaceJid) ?? updated;
+    if (providerChanged) {
+      deleteSession(updated.folder);
+      delete sessions[updated.folder];
+    }
   }
 
   if (hasEnvChanges) {
@@ -2114,6 +2202,302 @@ async function handleNewCommand(
   return `工作区「${name}」已创建并绑定${details}\n\n发送 /unbind 可解绑回默认工作区`;
 }
 
+function formatFromAppThreadList(threads: CodexRecentThread[]): string {
+  const lines = threads.map((thread, index) => {
+    const time = new Date(thread.updatedAtIso).toLocaleString('zh-CN', {
+      timeZone: TIMEZONE,
+      hour12: false,
+    });
+    const cwdName = path.basename(thread.cwd) || thread.cwd;
+    const title = truncateCommandText(thread.displayTitle || '(无标题线程)', 80);
+    const preview = truncateCommandText(getThreadPreviewText(thread), 120);
+    const showPreview =
+      preview
+      && preview !== '无额外摘要'
+      && preview !== title;
+
+    return [
+      `### ${index + 1}. ${title}`,
+      `- 🕒 **时间**：${time}`,
+      `- 📂 **目录**：${cwdName}`,
+      ...(showPreview ? [`- 💬 **摘要**：`, `> ${preview}`] : []),
+    ].join('\n');
+  });
+
+  return (
+    '# 🔀 Codex App 最近活跃线程\n\n'
+    + '请选择要继续的线程编号。\n\n'
+    + '---\n\n'
+    + lines.join('\n\n---\n\n')
+    + '\n\n---\n\n'
+    + '## ✅ 下一步\n\n'
+    + '- 继续某条线程：**`/fromapp <编号>`**\n'
+    + '- 取消当前选择：**`/fromapp cancel`**'
+  );
+}
+
+function truncateCommandText(text: string, maxLen: number): string {
+  return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
+}
+
+function deriveFromAppWorkspaceName(thread: CodexRecentThread): string {
+  const base = (thread.displayTitle || thread.title || 'App 导入线程')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const prefixed = `[App] ${base}`;
+  return prefixed.length > 50 ? `${prefixed.slice(0, 49)}…` : prefixed;
+}
+
+async function handleFromAppCommand(
+  chatJid: string,
+  rawArgs: string,
+): Promise<string> {
+  const sourceGroup = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!sourceGroup) return '未找到当前会话';
+  const userId = sourceGroup.created_by;
+  if (!userId) return '无法确定当前聊天所属用户';
+  const owner = getUserById(userId);
+  if (owner?.role !== 'admin') {
+    return '当前版本的 from app 仅支持管理员在 host 模式下使用';
+  }
+
+  const parsed = parseFromAppCommandArgs(rawArgs);
+  if (parsed.error) {
+    return `${parsed.error}\n\n用法：/fromapp 先列线程，随后发送 /fromapp <编号> [--provider claude|openai]`;
+  }
+  if (parsed.cancel) {
+    pendingFromAppSelections.delete(chatJid);
+    return '已取消当前 from app 线程选择。';
+  }
+
+  if (parsed.selection === undefined) {
+    const threads = listRecentCodexThreads(6);
+    if (threads.length === 0) {
+      pendingFromAppSelections.delete(chatJid);
+      return '未找到可导入的 Codex App 最近活跃线程。';
+    }
+    pendingFromAppSelections.set(chatJid, {
+      createdAt: Date.now(),
+      threads,
+    });
+    return formatFromAppThreadList(threads);
+  }
+
+  const selection = parsed.selection;
+  if (!Number.isFinite(selection) || selection <= 0) {
+    return '用法：/fromapp 先列线程，再发送 /fromapp <编号> [--provider claude|openai] 进行导入。';
+  }
+
+  const pending = pendingFromAppSelections.get(chatJid);
+  if (!pending) {
+    return '当前没有待导入的线程列表，请先发送 /fromapp 获取最近活跃线程。';
+  }
+  if (Date.now() - pending.createdAt > FROM_APP_SELECTION_TTL_MS) {
+    pendingFromAppSelections.delete(chatJid);
+    return '线程列表已过期，请重新发送 /fromapp 获取最新列表。';
+  }
+  const thread = pending.threads[selection - 1];
+  if (!thread) {
+    return `编号无效，请输入 1-${pending.threads.length} 之间的数字。`;
+  }
+
+  const liveThread = getCodexThreadById(thread.id);
+  if (!liveThread) {
+    pendingFromAppSelections.delete(chatJid);
+    return '选中的 App 线程不存在了，请重新发送 /fromapp。';
+  }
+  if (!fs.existsSync(liveThread.cwd)) {
+    pendingFromAppSelections.delete(chatJid);
+    return `选中的 App 线程工作目录不存在：${liveThread.cwd}`;
+  }
+  const messages = readCodexThreadMessages(liveThread.rolloutPath);
+  if (messages.length === 0) {
+    pendingFromAppSelections.delete(chatJid);
+    return '选中的 App 线程没有可导入的对话内容。';
+  }
+
+  const workspaceJid = `web:${crypto.randomUUID()}`;
+  const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const now = new Date().toISOString();
+  const systemSettings = getSystemSettings();
+  const workspaceName = deriveFromAppWorkspaceName(liveThread);
+  const defaultBinding = getDefaultLlmBinding();
+  const targetProvider = parsed.llmProvider ?? defaultBinding.llm_provider;
+  const defaultCodexThinkingEffort =
+    systemSettings.defaultCodexThinkingEffort || undefined;
+  const targetModel = targetProvider === 'claude'
+    ? (sourceGroup.claude_model
+      ?? sourceGroup.model
+      ?? defaultBinding.model
+      ?? undefined)
+    : (sourceGroup.codex_model
+      ?? sourceGroup.model
+      ?? systemSettings.defaultCodexModel
+      ?? defaultBinding.model
+      ?? undefined);
+  const targetThinkingEffort = targetProvider === 'claude'
+    ? (sourceGroup.claude_thinking_effort
+      ?? sourceGroup.thinking_effort
+      ?? defaultBinding.thinking_effort
+      ?? undefined)
+    : (sourceGroup.codex_thinking_effort
+      ?? sourceGroup.thinking_effort
+      ?? defaultCodexThinkingEffort
+      ?? defaultBinding.thinking_effort
+      ?? undefined);
+
+  const newGroup: RegisteredGroup = {
+    name: workspaceName,
+    folder,
+    added_at: now,
+    executionMode: 'host',
+    customCwd: liveThread.cwd,
+    created_by: userId,
+    llm_provider: targetProvider,
+    claude_model: targetProvider === 'claude' ? targetModel : undefined,
+    claude_thinking_effort:
+      targetProvider === 'claude' ? targetThinkingEffort : undefined,
+    codex_model: targetProvider === 'openai' ? targetModel : undefined,
+    codex_thinking_effort:
+      targetProvider === 'openai' ? targetThinkingEffort : undefined,
+    model: targetModel,
+    thinking_effort: targetThinkingEffort,
+    context_compression: sourceGroup.context_compression ?? undefined,
+    knowledge_extraction: sourceGroup.knowledge_extraction ?? false,
+  };
+
+  registerGroup(workspaceJid, newGroup);
+  ensureChatExists(workspaceJid);
+  updateChatName(workspaceJid, workspaceName);
+  addGroupMember(folder, userId, 'owner', userId);
+
+  const groupDir = path.join(GROUPS_DIR, folder);
+  const summary = await buildHandoffSummary(liveThread, messages, {
+    provider: targetProvider,
+    model: targetModel,
+    thinkingEffort: targetThinkingEffort,
+  });
+  const index = buildContextIndex(messages);
+
+  const binding: AppBindingRecord = {
+    sourceThreadId: liveThread.id,
+    sourceThreadTitle: liveThread.displayTitle,
+    sourceThreadCwd: liveThread.cwd,
+    sourceThreadRolloutPath: liveThread.rolloutPath,
+    sourceThreadSource: liveThread.source,
+    importedAt: now,
+    importMode: 'handoff',
+    status: 'active',
+    workspaceJid,
+    workspaceFolder: folder,
+    sourceChatJid: chatJid,
+    restoreWorkspaceJid: sourceGroup.target_main_jid ?? null,
+    restoreAgentId: sourceGroup.target_agent_id ?? null,
+  };
+
+  writeThreadSnapshotFiles({
+    workspaceDir: groupDir,
+    binding,
+    summary,
+    transcriptSourcePath: liveThread.rolloutPath,
+    index,
+  });
+  fs.writeFileSync(path.join(groupDir, 'CLAUDE.md'), `${summary.trim()}\n`, 'utf-8');
+
+    const reboundSourceGroup: RegisteredGroup = {
+      ...sourceGroup,
+      target_main_jid: workspaceJid,
+      target_agent_id: undefined,
+      reply_policy: 'source_only',
+  };
+  setRegisteredGroup(chatJid, reboundSourceGroup);
+  registeredGroups[chatJid] =
+    getRegisteredGroup(chatJid) ?? reboundSourceGroup;
+  const latestChatMsg = getMessagesPage(chatJid, undefined, 1)[0];
+  if (latestChatMsg) {
+    setCursors(chatJid, {
+      timestamp: latestChatMsg.timestamp,
+      id: latestChatMsg.id,
+    });
+  }
+  pendingFromAppSelections.delete(chatJid);
+
+  const info = getWorkspaceInfoForChat(chatJid);
+  const details = info
+    ? `\n\n${formatWorkspaceRuntimeDetails(info.details)}`
+    : '';
+  return (
+    `已选择 [${selection}]「${liveThread.title || liveThread.id}」。\n`
+    + `已从 Codex App 导入该线程，并创建绑定工作区「${workspaceName}」。`
+    + `${details}\n\n默认只导入压缩 handoff；完整线程快照已保存在工作区中。`
+  );
+}
+
+async function handleToAppCommand(chatJid: string): Promise<string> {
+  const workspaceJid = resolveCurrentWorkspaceJid(chatJid);
+  if (!workspaceJid) return '未找到当前绑定的工作区';
+  const workspaceGroup = registeredGroups[workspaceJid] ?? getRegisteredGroup(workspaceJid);
+  if (!workspaceGroup) return '未找到当前绑定的工作区';
+
+  const groupDir = path.join(GROUPS_DIR, workspaceGroup.folder);
+  const binding = readAppBinding(groupDir);
+  if (!binding) {
+    return '当前工作区不是 from app 导入的绑定工作区。';
+  }
+
+  const syncingBinding: AppBindingRecord = { ...binding, status: 'syncing' };
+  writeAppBinding(groupDir, syncingBinding);
+
+  const summary = await buildWorkspaceSyncSummary(
+    workspaceJid,
+    workspaceGroup,
+  );
+
+  const syncResult = syncResultBackToCodexThread(binding.sourceThreadId, summary);
+  if (!syncResult.ok) {
+    writeAppBinding(groupDir, { ...binding, status: 'failed' });
+    return `回写 App 线程失败：${syncResult.error}\n工作区已保留，可稍后重试 /toapp。`;
+  }
+
+  writeAppBinding(groupDir, { ...binding, status: 'synced' });
+
+  const sourceChatGroup =
+    registeredGroups[binding.sourceChatJid] ?? getRegisteredGroup(binding.sourceChatJid);
+  if (sourceChatGroup) {
+    const restored: RegisteredGroup = {
+      ...sourceChatGroup,
+      target_main_jid: binding.restoreWorkspaceJid ?? undefined,
+      target_agent_id: binding.restoreAgentId ?? undefined,
+      reply_policy: 'source_only',
+    };
+    setRegisteredGroup(binding.sourceChatJid, restored);
+    registeredGroups[binding.sourceChatJid] =
+      getRegisteredGroup(binding.sourceChatJid) ?? restored;
+  }
+
+  const siblingJids = getJidsByFolder(workspaceGroup.folder);
+  try {
+    await Promise.all(
+      siblingJids.map((jid) => queue.stopGroup(jid, { force: true })),
+    );
+  } catch (err) {
+    logger.warn(
+      { workspaceJid, folder: workspaceGroup.folder, err },
+      'Failed to stop workspace before app sync cleanup',
+    );
+  }
+
+  deleteGroupData(workspaceJid, workspaceGroup.folder);
+  removeFlowArtifacts(workspaceGroup.folder);
+  deleteRegisteredGroup(workspaceJid);
+  deleteChatHistory(workspaceJid);
+  delete registeredGroups[workspaceJid];
+  delete sessions[workspaceGroup.folder];
+  pendingFromAppSelections.delete(chatJid);
+
+  return '已将当前工作区结果回写到来源 Codex App 线程，并清理该临时工作区。';
+}
+
 function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '未找到当前会话';
@@ -2245,6 +2629,80 @@ async function summarizeWithClaude(transcript: string): Promise<string | null> {
   const prompt = `请用简洁的中文总结以下对话的要点和进展，重点说明讨论了什么、达成了什么结论、还有什么待办事项。不要逐条翻译，而是提炼核心信息。\n\n${transcript}`;
   const model = process.env.RECALL_MODEL || undefined;
   return sdkQuery(prompt, { model, timeout: 30_000 });
+}
+
+async function buildWorkspaceSyncSummary(
+  workspaceJid: string,
+  workspaceGroup: RegisteredGroup,
+): Promise<string> {
+  const messages = getMessagesPage(workspaceJid, undefined, 20)
+    .filter((msg) => msg.content && msg.content !== 'context_reset')
+    .reverse();
+
+  const transcript = messages
+    .map((msg) => {
+      const who = msg.is_from_me ? '助手' : msg.sender_name || '用户';
+      return `${who}: ${(msg.content || '').trim()}`;
+    })
+    .filter(Boolean)
+    .join('\n\n');
+
+  const summary = transcript
+    ? await sdkQuery(
+      [
+        '请将以下 HappyClaw 工作区的执行过程整理成一段准备回写到 Codex App 线程的中文摘要。',
+        '输出格式：',
+        '## 本次处理结果',
+        '## 后续建议',
+        '',
+        '要求：',
+        '- 用简洁中文',
+        '- 不要暴露中间推理',
+        '- 如果缺失信息写“未明确”',
+        '',
+        transcript,
+      ].join('\n'),
+      { timeout: 45_000 },
+    )
+    : null;
+
+  const artifacts = await getWorkspaceArtifactSummary(workspaceGroup);
+
+  return [
+    '【HappyClaw 中转结果】',
+    '',
+    '## 本次处理结果',
+    summary?.trim() || '未能自动生成摘要，请查看工作区最近对话。',
+    '',
+    '## 关键产物',
+    artifacts || '未识别到明确产物，可查看工作目录中的最新变更。',
+    '',
+    '## 工作目录',
+    workspaceGroup.customCwd || path.join(GROUPS_DIR, workspaceGroup.folder),
+  ].join('\n');
+}
+
+async function getWorkspaceArtifactSummary(
+  workspaceGroup: RegisteredGroup,
+): Promise<string> {
+  const cwd = workspaceGroup.customCwd;
+  if (!cwd) return '';
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', cwd, 'status', '--short'],
+      { timeout: 5000 },
+    );
+    const lines = stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 10);
+    if (lines.length === 0) return '';
+    return lines.map((line) => `- ${line}`).join('\n');
+  } catch {
+    return '';
+  }
 }
 
 // ─── /sw & /spawn: parallel task spawning ────────────────────────

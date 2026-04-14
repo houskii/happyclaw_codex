@@ -6,6 +6,12 @@ interface SystemInfoProps {
   status: SystemStatus;
 }
 
+interface VersionInfo {
+  host: string | null;
+  container: string | null;
+  latest: string | null;
+}
+
 /** Extract semver-like version number from strings like "2.1.81 (runner)" */
 function extractVersion(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -38,6 +44,43 @@ function VersionBadge({ current, latest }: { current: string | null | undefined;
   );
 }
 
+function VersionRow({
+  label,
+  info,
+}: {
+  label: string;
+  info: VersionInfo;
+}) {
+  return (
+    <>
+      {info.latest && (
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">{label} 最新稳定版</span>
+          <span className="text-foreground font-medium font-mono text-xs">
+            {info.latest}
+          </span>
+        </div>
+      )}
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-muted-foreground">{label} 宿主机</span>
+        <span className="text-foreground font-medium font-mono text-xs flex items-center">
+          {extractVersion(info.host) || info.host || '未知'}
+          <VersionBadge current={info.host} latest={info.latest} />
+        </span>
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-muted-foreground">{label} 容器</span>
+        <span className="text-foreground font-medium font-mono text-xs flex items-center">
+          {extractVersion(info.container) || info.container || '未构建'}
+          {info.container && (
+            <VersionBadge current={info.container} latest={info.latest} />
+          )}
+        </span>
+      </div>
+    </>
+  );
+}
+
 export function SystemInfo({ status }: SystemInfoProps) {
   const formatUptime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -49,7 +92,7 @@ export function SystemInfo({ status }: SystemInfoProps) {
     return `${minutes}m`;
   };
 
-  const versions = status.agentRuntimeVersions ?? status.claudeCodeVersions;
+  const systemVersions = status.systemVersions;
 
   return (
     <Card>
@@ -72,32 +115,12 @@ export function SystemInfo({ status }: SystemInfoProps) {
           </span>
         </div>
 
-        {versions !== undefined && (
+        {systemVersions !== undefined && (
           <>
-            {versions?.latest && (
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">最新 Agent Runtime 版本</span>
-                <span className="text-foreground font-medium font-mono text-xs">
-                  {versions.latest}
-                </span>
-              </div>
-            )}
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">宿主机</span>
-              <span className="text-foreground font-medium font-mono text-xs flex items-center">
-                {extractVersion(versions?.host) || '未知'}
-                <VersionBadge current={versions?.host} latest={versions?.latest} />
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">容器</span>
-              <span className="text-foreground font-medium font-mono text-xs flex items-center">
-                {versions?.container ? extractVersion(versions.container) || versions.container : '未构建'}
-                {versions?.container && (
-                  <VersionBadge current={versions.container} latest={versions?.latest} />
-                )}
-              </span>
-            </div>
+            <VersionRow label="Claude Code" info={systemVersions!.claudeCode} />
+            <VersionRow label="Claude SDK" info={systemVersions!.claudeAgentSdk} />
+            <VersionRow label="Codex CLI" info={systemVersions!.codexCli} />
+            <VersionRow label="Codex SDK" info={systemVersions!.codexSdk} />
           </>
 
         )}

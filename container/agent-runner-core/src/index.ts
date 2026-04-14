@@ -59,6 +59,7 @@ export { GroupsPlugin } from './plugins/groups.js';
 export { MemoryPlugin } from './plugins/memory.js';
 export type { MemoryPluginOptions } from './plugins/memory.js';
 export { SkillsPlugin } from './plugins/skills.js';
+export { AppContextPlugin } from './plugins/app-context.js';
 export {
   shorten,
   redactSensitive,

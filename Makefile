@@ -21,7 +21,7 @@ endif
 
 # ─── Development ─────────────────────────────────────────────
 
-dev: ## 启动前后端（首次自动安装依赖和构建容器镜像）
+dev: ensure-latest-sdk ## 启动前后端（首次自动安装依赖和构建容器镜像）
 	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner-core/package.json -nt container/agent-runner-core/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
 	@$(MAKE) build-agent-runner-core
@@ -183,19 +183,38 @@ sync-types: ## 同步 shared/ 下的类型定义到各子项目
 
 # ─── SDK ─────────────────────────────────────────────────────
 
-update-sdk: ## 更新 agent-runner 的 Claude Agent SDK 到最新版本
-	cd container/agent-runner && $(PKG) update @anthropic-ai/claude-agent-sdk && $(PKG) run build
+update-sdk: ## 更新 agent-runner 的 Claude/Codex SDK 到最新稳定版本
+	@CLAUDE_LATEST=$$(npm view @anthropic-ai/claude-agent-sdk version --fetch-timeout=5000 2>/dev/null || node -p "require('./container/agent-runner/node_modules/@anthropic-ai/claude-agent-sdk/package.json').version" 2>/dev/null || echo ""); \
+	CODEX_LATEST=$$(npm view @openai/codex-sdk version --fetch-timeout=5000 2>/dev/null || node -p "require('./container/agent-runner/node_modules/@openai/codex-sdk/package.json').version" 2>/dev/null || echo ""); \
+	if [ -z "$$CLAUDE_LATEST" ] || [ -z "$$CODEX_LATEST" ]; then \
+		echo "❌ 无法获取最新 SDK 版本"; \
+		exit 1; \
+	fi; \
+	cd container/agent-runner && npm install @anthropic-ai/claude-agent-sdk@$$CLAUDE_LATEST @openai/codex-sdk@$$CODEX_LATEST && $(PKG) run build
 	@echo "SDK updated. Run 'make typecheck' to verify."
 
-ensure-latest-sdk: ## 启动前自动检测并更新 SDK（有新版才更新）
-	@LOCAL=$$(node -p "require('./container/agent-runner/node_modules/@anthropic-ai/claude-agent-sdk/package.json').version" 2>/dev/null || echo "0.0.0"); \
-	LATEST=$$(npm view @anthropic-ai/claude-agent-sdk version --fetch-timeout=5000 2>/dev/null || echo "$$LOCAL"); \
-	if [ "$$LOCAL" != "$$LATEST" ]; then \
-		echo "🔄 Claude Agent SDK 有新版本: $$LOCAL → $$LATEST，正在更新..."; \
-		cd container/agent-runner && $(PKG) update @anthropic-ai/claude-agent-sdk && $(PKG) run build; \
-		echo "✅ SDK 更新完成（内置 Claude Code 版本随之更新）"; \
+ensure-latest-sdk: ## 启动前自动检测并更新 Claude/Codex SDK（有新版才更新）
+	@CLAUDE_LOCAL=$$(node -p "require('./container/agent-runner/node_modules/@anthropic-ai/claude-agent-sdk/package.json').version" 2>/dev/null || echo "0.0.0"); \
+	CLAUDE_LATEST=$$(npm view @anthropic-ai/claude-agent-sdk version --fetch-timeout=5000 2>/dev/null || echo "$$CLAUDE_LOCAL"); \
+	CODEX_LOCAL=$$(node -p "require('./container/agent-runner/node_modules/@openai/codex-sdk/package.json').version" 2>/dev/null || echo "0.0.0"); \
+	CODEX_LATEST=$$(npm view @openai/codex-sdk version --fetch-timeout=5000 2>/dev/null || echo "$$CODEX_LOCAL"); \
+	if [ "$$CLAUDE_LOCAL" != "$$CLAUDE_LATEST" ] || [ "$$CODEX_LOCAL" != "$$CODEX_LATEST" ]; then \
+		echo "🔄 SDK 有新版本，正在更新..."; \
+		if [ "$$CLAUDE_LOCAL" != "$$CLAUDE_LATEST" ]; then \
+			echo "   Claude Agent SDK: $$CLAUDE_LOCAL → $$CLAUDE_LATEST"; \
+		else \
+			echo "   Claude Agent SDK: $$CLAUDE_LOCAL (已是最新)"; \
+		fi; \
+		if [ "$$CODEX_LOCAL" != "$$CODEX_LATEST" ]; then \
+			echo "   Codex SDK: $$CODEX_LOCAL → $$CODEX_LATEST"; \
+		else \
+			echo "   Codex SDK: $$CODEX_LOCAL (已是最新)"; \
+		fi; \
+		cd container/agent-runner && npm install @anthropic-ai/claude-agent-sdk@$$CLAUDE_LATEST @openai/codex-sdk@$$CODEX_LATEST && $(PKG) run build; \
+		echo "✅ SDK 更新完成"; \
 	else \
-		echo "✅ Claude Agent SDK 已是最新 ($$LOCAL)"; \
+		echo "✅ Claude Agent SDK 已是最新 ($$CLAUDE_LOCAL)"; \
+		echo "✅ Codex SDK 已是最新 ($$CODEX_LOCAL)"; \
 	fi
 
 # ─── Setup ───────────────────────────────────────────────────
